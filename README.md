@@ -8,4 +8,6 @@ Just run install.sh script from the main directory: `bash install.sh`. A working
 
 ### Usage
 
+Activate the environment spectfbcalc before usage `conda activate spectfbcalc` or select it as the jupyter interpreter.
+
 Have a look at `spectfbcalc/test_fbcalc.ipynb` for a usage example.
