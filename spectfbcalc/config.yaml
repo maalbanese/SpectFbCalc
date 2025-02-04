@@ -1,0 +1,47 @@
+variables:
+  vnams:
+      - t
+      - ts
+      - wv_lw
+      - wv_sw
+      - alb
+  tips:
+      - clr
+      - cld
+  alb:
+    components:
+      - rsus
+      - rsds
+    use_climatology: true
+    time_range:
+      - "1990-01-01"
+      - "2001-12-31"
+  other_var:
+    use_climatology: false
+    time_range:
+      - "1990-01-01"
+      - "2021-12-31"
+chunk_size: 12
+
+file_paths:
+  reference_dataset: "/work/users/malbanese/radspesoft/std_sim/oifs/s000_atm_cmip6_1m_*_regridded.nc"
+  reference_dataset_pl: "/work/users/malbanese/radspesoft/std_sim/oifs/s000_atm_cmip6_pl_1m_*_regridded.nc"
+  experiment_dataset: "/work/users/malbanese/radspesoft/t_sim/s003/oifs/s003_atm_cmip6_1m_*_regridded.nc"
+  experiment_dataset_pl : "/work/users/malbanese/radspesoft/t_sim/s003/oifs/s003_atm_cmip6_pl_1m_*_regridded.nc"
+  kernel: "/work/users/malbanese/radspesoft/kernels/Huang/toa/RRTMG_{}_toa_{}_highR.nc"
+  output_k: "/work/users/malbanese/radspesoft/output/rad_Huang/"
+  output: "/work/users/malbanese/radspesoft/output/rad_Huang/s003_feedbacks/"
+  pressure_level: "/work/users/malbanese/radspesoft/kernels/Huang/toa/dp.nc"
+  pressure_data: "/work/users/malbanese/radspesoft/std_sim/oifs" 
+
+
+#variables_mapping: 
+  #...: time_counter #time variable
+  #...: alb #albedo
+  #...: rsus # surface upwelling solar radiation
+  #...: rsds # surface downwelling solar radiation
+  #...: ts # surface temperature
+  #...: ta # air temperature
+  #...: hus #specific humidity
+
+
