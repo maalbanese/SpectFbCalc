@@ -27,9 +27,13 @@ def mytestfunction():
     return
 
 
-###### Broad-band kernels ######
+###### INPUT/OUTPUT SECTION: load kernels, load data ######
 
-#PRENDERE I KERNEL
+def load_spectral_kernel():
+
+    ## per ste
+
+    return allkers
 
 def load_kernel(cart_k:str, cart_out:str):
     """
@@ -78,7 +82,24 @@ def load_kernel(cart_k:str, cart_out:str):
     pickle.dump(allkers, open(cart_out + 'allkers.p', 'wb'))
     return allkers
 
-##CALCOLO PIMEAN
+
+def read_data(config):
+    return ds
+
+def read_data_ref(config):
+    return ds_ref
+
+def standardize_names():
+    return
+
+
+######################################################################################
+#### Aux functions
+
+def ref_clim(ds_ref):
+
+    return ds_clim
+
 
 def climatology(filin_pi:str, cart_k:str, cart_out:str, allvars:str, use_climatology=True, time_chunk=12):
     """
@@ -302,6 +323,24 @@ def dlnws(T):
     return dws
 
 #calcolo ts_anom e gtas e plank surf
+
+
+def fb_planck_surf_from_file(config):
+
+    ds = read_data()
+    ds_ref = read_data_ref()
+    ds_clim = ref_clim()
+
+    kernels = load_kernel()
+
+    fb_planck_surf(ds, ds_clim)
+
+    return
+
+
+def fb_planck_surf_core(ds, ds_clim, kernels):
+    return
+
 
 def fb_planck_surf(filin_4c:str, filin_pi:str, cart_out:str, cart_k:str, use_climatology=True, time_chunk=12):
     """
