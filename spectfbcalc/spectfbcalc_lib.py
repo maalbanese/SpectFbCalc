@@ -3,8 +3,6 @@
 
 ##### Package imports
 
-import sys
-sys.path.append('/work/users/malbanese/radspesoft/ClimTools/climtools')
 
 import os
 import glob
@@ -32,7 +30,6 @@ def mytestfunction():
     print('test!')
     return
 
-# FROM UNSTRUCTURED TO LATLON GRID X EC-EARTH4 FILES
 def regrid_files(input_pattern, target_grid, method, output_dir):
     """
     Regrids input files to a target grid using the smmregrid package.
@@ -70,9 +67,7 @@ def regrid_files(input_pattern, target_grid, method, output_dir):
         output_file = os.path.join(output_dir, f"{os.path.basename(file).replace('.nc', '_regridded.nc')}")
         regridded_ds.to_netcdf(output_file)
         # print(f"Regridded file saved: {output_file}")
-
-# AGGIUNGI FUNZIONE RENAME DATASET ???
-
+        return
 
 ###### Broad-band kernels ######
 
