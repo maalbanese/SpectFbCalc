@@ -112,6 +112,7 @@ def load_kernel_ERA5(cart_k:str, cart_out:str):
     pickle.dump(allkers, open(cart_out + 'allkers_ERA5.p', 'wb'))
     return allkers
 
+
 def load_kernel_HUANG(cart_k:str, cart_out:str):
     """
     Loads and processes climate kernel datasets (from HUANG 2017), and saves specific datasets to pickle files.
@@ -166,13 +167,29 @@ def load_kernel_HUANG(cart_k:str, cart_out:str):
 
 
 def read_data(config):
+    """
+    Reads path of files from config.yml, read all vars and put them in a standardized dataset.
+    """
+
+    # read config
+
+    # read data
+
+    ds = standardize_names(ds)
+
     return ds
 
 def read_data_ref(config):
+    """
+    Same for reference experiment.
+    """
     return ds_ref
 
-def standardize_names():
-    return
+def standardize_names(ds):
+    """
+    standardizes variable and coordinate names
+    """
+    return ds
 
 
 ######################################################################################
@@ -443,7 +460,7 @@ def dlnws(T):
 #calcolo ts_anom e gtas e plank surf
 
 
-def fb_planck_surf_from_file(config):
+def fb_planck_surf_wrapper(config):
 
     ds = read_data()
     ds_ref = read_data_ref()
@@ -451,7 +468,7 @@ def fb_planck_surf_from_file(config):
 
     kernels = load_kernel()
 
-    fb_planck_surf(ds, ds_clim)
+    fb_planck_surf_core(ds, ds_clim)
 
     return
 
