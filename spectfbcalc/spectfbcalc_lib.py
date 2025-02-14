@@ -286,54 +286,44 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climat
     pimean = dict()
     if allvars=='alb':
         allvars='rsus rsds'.split()
-        if use_climatology==True:
-            for vnam in allvars:
-                filist = glob.glob(filin_pi.format(vnam))
-                filist.sort()
+        for vnam in allvars:
+            filist = glob.glob(filin_pi.format(vnam))
+            filist.sort()
 
-                var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
+            var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
+            if time_range is not None:
+                var = var.sel(time = slice(time_range[0], time_range[1]))
+            if use_climatology:
                 var_mean = var.groupby('time.month').mean()
                 var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
-                pimean[vnam] = var_mean[vnam].compute()
+                pimean[vnam] = var_mean[vnam]
+            else:
+                piok[vnam] = ctl.regrid_dataset(var[vnam], k.lat, k.lon)
 
+        if use_climatology:
             piok = pimean[('rsus')]/pimean[('rsds')]
-
         else:
-            piok=dict()
-            for vnam in allvars:
-                filist = glob.glob(filin_pi.format(vnam))
-                filist.sort()
-                pivar = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
-                if time_range is not None:
-                    pivar = pivar.sel(time = slice(time_range[0], time_range[1]))
-                piok[vnam] = ctl.regrid_dataset(pivar[vnam], k.lat, k.lon)
-     
-            pivar['alb']=piok[('rsus')]/piok[('rsds')]
-            piok = ctl.regrid_dataset(pivar['alb'], k.lat, k.lon)
-            piok=ctl.running_mean(piok, 252)
-     
+            piok = piok[('rsus')]/piok[('rsds')]
+            piok = ctl.running_mean(piok, 252)
+
     else:
-        if use_climatology==True:
-    
-            filist = glob.glob(filin_pi.format(allvars))
-            filist.sort()
-            var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
+        filist = glob.glob(filin_pi.format(allvars))
+        filist.sort()
+        var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
+        if time_range is not None:
+            var = var.sel(time = slice(time_range[0], time_range[1]))
+
+        if use_climatology:
             var_mean = var.groupby('time.month').mean()
             var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
-            piok = var_mean[allvars].compute()
-
-        
+            piok = var_mean[allvars]
         else:
-            filist = glob.glob(filin_pi.format(allvars))
-            filist.sort()
-            pivar = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
-            if time_range is not None:
-                pivar = pivar.sel(time = slice(time_range[0], time_range[1]))
-            piok = ctl.regrid_dataset(pivar[allvars], k.lat, k.lon)
-            piok=ctl.running_mean(piok, 252)
+            piok = ctl.regrid_dataset(var[allvars], k.lat, k.lon)
+            piok = ctl.running_mean(piok, 252)
         
-    return(piok)
+    return piok
      
+
 
 ##calcolare tropopausa (Reichler 2003) 
 
@@ -524,9 +514,9 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
         piok=piok['ts'].drop('time')
         piok['time'] = var['time']
         piok = piok.chunk(var.chunks)
-        anoms = var['ts'] - piok
+        anoms = var - piok
     else:
-        anoms = var['ts'].groupby('time.month') - piok['ts']
+        anoms = var.groupby('time.month') - piok['ts']
  
     for tip in ['clr', 'cld']:
         kernel = allkers[(tip, 'ts')]
@@ -625,13 +615,13 @@ def Rad_anomaly_planck_atm_lr(ds, piok, cart_out:str, ker:str, allkers, surf_pre
         piok_ta['time'] = var['time']
         piok_ts=piok['ts'].drop('time')
         piok_ts['time'] = var['time']
-        anoms_ok = var['ta'] - piok_ta
-        ts_anom = var_ts['ts'] - piok_ts
+        anoms_ok = var - piok_ta
+        ts_anom = var_ts - piok_ts
     else:
-        anoms_ok=var['ta'].groupby('time.month') - piok['ta']
-        ts_anom=var_ts['ts'].groupby('time.month') - piok['ts']
+        anoms_ok=var.groupby('time.month') - piok['ta']
+        ts_anom=var_ts.groupby('time.month') - piok['ts']
 
-    mask=mask_atm(var['ta'])
+    mask=mask_atm(var)
     anoms_ok = (anoms_ok*mask).interp(plev = cose) 
 
     for tip in ['clr','cld']:
@@ -715,7 +705,7 @@ def Rad_anomaly_albedo(ds, piok, ker:str, allkers, cart_out:str, use_climatology
 
     var_rsus= ds['rsus']
     var_rsds=ds['rsds'] 
-    var = var_rsus['rsus']/var_rsds['rsds'] 
+    var = var_rsus/var_rsds 
     if time_range is not None:
         var = var.sel(time = slice(time_range[0], time_range[1])) 
     var = ctl.regrid_dataset(var, k.lat, k.lon)
@@ -818,8 +808,7 @@ def Rad_anomaly_wv(ds, piok,  cart_out:str, ker:str, allkers, surf_pressure, tim
         ds['hus'] = ds['hus'].sel(time = slice(time_range[0], time_range[1])) 
         ds['ta'] = ds['ta'].sel(time = slice(time_range[0], time_range[1]))
     var = ctl.regrid_dataset(ds['hus'], k.lat, k.lon)
-    var_ta=ds['ta']
-    mask=mask_atm(var_ta['ta'])
+    mask=mask_atm(ds['ta'])
 
     Rv = 487.5 # gas constant of water vapor
     Lv = 2.5e+06 # latent heat of water vapor
@@ -830,9 +819,12 @@ def Rad_anomaly_wv(ds, piok,  cart_out:str, ker:str, allkers, surf_pressure, tim
         piok_hus['time'] = var['time']
         piok_ta=piok['ta'].drop('time')
         piok_ta['time'] = var['time']
+    else:
+        piok_ta=piok['ta']
+        piok_hus=piok['hus']
  
     ta_abs_pi = piok_ta.interp(plev = cose)
-    var_int = (var['hus']*mask).interp(plev = cose)
+    var_int = (var*mask).interp(plev = cose)
     piok_int = piok_hus.interp(plev = cose)
   
     if ker=='HUANG':
@@ -936,9 +928,9 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
         piok_tas=piok['tas'].drop('time')
         piok_tas['time'] = var_tas['time']
         piok_tas = piok_tas.chunk(var_tas.chunks)
-        anoms_tas = var_tas['tas'] - piok_tas
+        anoms_tas = var_tas - piok_tas
     else:
-        anoms_tas = var_tas['tas'].groupby('time.month') - piok['tas']
+        anoms_tas = var_tas.groupby('time.month') - piok['tas']
         
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time') 
     gtas= gtas.groupby((gtas.year-1) // 10 * 10).mean()
@@ -995,9 +987,9 @@ def feedback_cloud_wrapper(config):
         piok_tas=piok['tas'].drop('time')
         piok_tas['time'] = var_tas['time']
         piok_tas = piok_tas.chunk(var_tas.chunks)
-        anoms_tas = var_tas['tas'] - piok_tas
+        anoms_tas = var_tas - piok_tas
     else:
-        anoms_tas = var_tas['tas'].groupby('time.month') - piok['tas']
+        anoms_tas = var_tas.groupby('time.month') - piok['tas']
         
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time') 
     gtas= gtas.groupby((gtas.year-1) // 10 * 10).mean()
@@ -1025,7 +1017,7 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None):
         - fb_cloud (float): Cloud radiative feedback strength.
         - fb_cloud_err (float): Estimated error in the cloud radiative feedback calculation.
     """
-    if not (ds['rlut'].dims["lon"] == ds['rsutcs'].dims["lon"] and ds['rlut'].dims["lat"] == ds['rsutcs'].dims["lat"]):
+    if not (ds['rlut'].dims == ds['rsutcs'].dims):
         raise ValueError("Error: The spatial grids ('lon' and 'lat') datasets must match.")
     
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
@@ -1040,8 +1032,8 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None):
     rsutcs = ds['rsutcs']
     rlutcs = ds['rlutcs']
 
-    N = - rlut['rlut'] - rsut['rsut']
-    N0 = - rsutcs['rsutcs'] - rlutcs['rlutcs']
+    N = - rlut - rsut
+    N0 = - rsutcs - rlutcs
 
     crf = (N0 - N) 
     crf = crf.groupby('time.year').mean('time')
