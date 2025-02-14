@@ -286,53 +286,42 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climat
     pimean = dict()
     if allvars=='alb':
         allvars='rsus rsds'.split()
-        if use_climatology==True:
-            for vnam in allvars:
-                filist = glob.glob(filin_pi.format(vnam))
-                filist.sort()
+        for vnam in allvars:
+            filist = glob.glob(filin_pi.format(vnam))
+            filist.sort()
 
-                var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
+            var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
+            if time_range is not None:
+                var = var.sel(time = slice(time_range[0], time_range[1]))
+            if use_climatology:
                 var_mean = var.groupby('time.month').mean()
                 var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
-                pimean[vnam] = var_mean[vnam].compute()
+                pimean[vnam] = var_mean[vnam]
+            else:
+                piok[vnam] = ctl.regrid_dataset(var[vnam], k.lat, k.lon)
 
+        if use_climatology:
             piok = pimean[('rsus')]/pimean[('rsds')]
-
         else:
-            piok=dict()
-            for vnam in allvars:
-                filist = glob.glob(filin_pi.format(vnam))
-                filist.sort()
-                pivar = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
-                if time_range is not None:
-                    pivar = pivar.sel(time = slice(time_range[0], time_range[1]))
-                piok[vnam] = ctl.regrid_dataset(pivar[vnam], k.lat, k.lon)
-     
-            pivar['alb']=piok[('rsus')]/piok[('rsds')]
-            piok = ctl.regrid_dataset(pivar['alb'], k.lat, k.lon)
-            piok=ctl.running_mean(piok, 252)
-     
+            piok = piok[('rsus')]/piok[('rsds')]
+            piok = ctl.running_mean(piok, 252)
+
     else:
-        if use_climatology==True:
-    
-            filist = glob.glob(filin_pi.format(allvars))
-            filist.sort()
-            var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
+        filist = glob.glob(filin_pi.format(allvars))
+        filist.sort()
+        var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
+        if time_range is not None:
+            var = var.sel(time = slice(time_range[0], time_range[1]))
+
+        if use_climatology:
             var_mean = var.groupby('time.month').mean()
             var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
-            piok = var_mean[allvars].compute()
-
-        
+            piok = var_mean[allvars]
         else:
-            filist = glob.glob(filin_pi.format(allvars))
-            filist.sort()
-            pivar = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
-            if time_range is not None:
-                pivar = pivar.sel(time = slice(time_range[0], time_range[1]))
-            piok = ctl.regrid_dataset(pivar[allvars], k.lat, k.lon)
-            piok=ctl.running_mean(piok, 252)
+            piok = ctl.regrid_dataset(var[allvars], k.lat, k.lon)
+            piok = ctl.running_mean(piok, 252)
         
-    return(piok)
+    return piok
      
 
 ##calcolare tropopausa (Reichler 2003) 
