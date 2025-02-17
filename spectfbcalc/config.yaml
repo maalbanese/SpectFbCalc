@@ -1,0 +1,21 @@
+kernels:
+  era5:
+    path_input: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang_ERA5/toa/RRTMG_{}_toa_{}_highR.nc"
+    path_output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_ERA5/"
+    filename_template: "ERA5_kernel_{}_TOA.nc"
+  huang:
+    path_input: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang/toa/RRTMG_{}_toa_{}_highR.nc"
+    path_output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_Huang/"
+    filename_template: "RRTMG_{}_toa_{}_highR.nc"
+
+file_paths:
+  reference_dataset: "/work/users/malbanese/radspesoft/SpectFbCalc_m/std_sim/oifs/s000_atm_cmip6_1m_*_regridded.nc"
+  experiment_dataset: "/work/users/malbanese/radspesoft/SpectFbCalc_m/t_sim/s003/oifs/s003_atm_cmip6_1m_*_regridded.nc"
+  pressure_level: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang/toa/dp.nc"
+  pressure_data: "/work/users/malbanese/radspesoft/SpectFbCalc_m/std_sim/oifs" 
+
+use_climatology: true
+time_range:
+  start: "1990-01-01"
+  end: "2001-12-31"
+time_chunk: 12

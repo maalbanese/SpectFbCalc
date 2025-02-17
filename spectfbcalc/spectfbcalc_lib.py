@@ -18,6 +18,7 @@ import matplotlib.cbook as cbook
 from scipy import stats
 import pickle
 import dask.array as da
+import yaml
 
 ######################################################################
 ### Functions
@@ -26,20 +27,19 @@ def mytestfunction():
     print('test!')
     return
 
-
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
 
-def load_spectral_kernel():
+def load_spectral_kernel(config_file):
 
     ## per ste
 
     return allkers
 
 #Definire una funzione di check che apra i file, controlli i nomi delle variabili, 
-# ##e nel caso non siano uniformi agli standard del codice chieda all'utente di cambiarli
+#e nel caso non siano uniformi agli standard del codice chieda all'utente di cambiarli
 
 #PRENDERE I KERNEL
-def load_kernel_ERA5(cart_k:str, cart_out:str):
+def load_kernel_ERA5(config_file):
     """
     Loads and preprocesses ERA5 kernels for further analysis.
 
@@ -78,10 +78,14 @@ def load_kernel_ERA5(cart_k:str, cart_out:str):
     - This function uses the Xarray library to handle datasets and Pickle to save processed data.
 
     """
+
+    cart_k = config_file['kernels']['era5']['path_input']
+    cart_out = config_file['kernels']['era5']['path_output']
+    finam = config_file['kernels']['era5']['filename_template']
+
     vnams = ['ta_dp', 'ts', 'wv_lw_dp', 'wv_sw_dp', 'alb']
-    allkers = dict()
-    finam='ERA5_kernel_{}_TOA.nc'
     tips = ['clr', 'cld']
+    allkers = dict()
     for tip in tips:
         for vna in vnams:
             ker = xr.load_dataset(cart_k+ finam.format(vna))
@@ -110,8 +114,7 @@ def load_kernel_ERA5(cart_k:str, cart_out:str):
     pickle.dump(cose, open(cart_out + 'cose_ERA5.p', 'wb'))
     return allkers
 
-
-def load_kernel_HUANG(cart_k:str, cart_out:str):
+def load_kernel_HUANG(config_file):
     """
     Loads and processes climate kernel datasets (from HUANG 2017), and saves specific datasets to pickle files.
 
@@ -137,10 +140,12 @@ def load_kernel_HUANG(cart_k:str, cart_out:str):
       - `cose.p`: A scaled version (100x) of the 'player' variable from the vertical levels data.
     """
 
+    cart_k = config_file['kernels']['huang']['path_input']
+    cart_out = config_file['kernels']['huang']['path_output']
+    finam = config_file['kernels']['huang']['filename_template']
 
     vnams = ['t', 'ts', 'wv_lw', 'wv_sw', 'alb']
     tips = ['clr', 'cld']
-    finam = 'RRTMG_{}_toa_{}_highR.nc'
     allkers = dict()
 
     for tip in tips:
@@ -160,7 +165,7 @@ def load_kernel_HUANG(cart_k:str, cart_out:str):
     pickle.dump(cose, open(cart_out + 'cose_HUANG.p', 'wb'))
     return allkers
 
-def load_kernel(ker, cart_k, cart_out):
+def load_kernel(ker, config_file):
     """
     Loads and processes climate kernel datasets, and saves specific datasets to pickle files.
 
@@ -193,38 +198,96 @@ def load_kernel(ker, cart_k, cart_out):
     """
 
     if ker=='ERA5':
-        allkers=load_kernel_ERA5(cart_k, cart_out)
+        allkers=load_kernel_ERA5(config_file)
     if ker=='HUANG':
-        allkers=load_kernel_HUANG(cart_k, cart_out)
+        allkers=load_kernel_HUANG(config_file)
     return allkers
 
-def read_data(config):
+######################################################################################
+#### Aux functions
+
+standard_names = {
+    "rsus": "surface upwelling shortwave radiation",
+    "rsds": "surface downwelling shortwave radiation",
+    "time": "time dimension",
+    "lat": "latitude",
+    "lon": "longitude",
+    "plev": "pressure levels",
+    "ps": "surface pressure",
+    "ts": "surface temperature",
+    "tas": "near-surface air temperature",
+    "ta": "atmospheric temperature",
+    "hus": "specific humidity",
+    "rlut":"outgoing longwave radiation",
+    "rsut":"reflected shortwave radiation",
+    "rlutcs":"clear-sky outgoing longwave radiation",
+    "rsutcs":"clear-sky outgoing shortwave radiation"
+}
+
+def read_data(config_file, standard_names):
     """
-    Reads path of files from config.yml, read all vars and put them in a standardized dataset.
+    Reads the configuration from the YAML file, opens the NetCDF file specified in the config,
+    and standardizes the variable names in the dataset.
+    
+    Parameters:
+    -----------
+    config_path : str
+        The path to the YAML configuration file.
+    
+    standard_names : dict
+        A dictionary containing the standard names for variables.
+    
+    Returns:
+    --------
+    ds : xarray.Dataset
+        The dataset with standardized variable names.
     """
-    # read config
-
-    # read data
-
-    ds = standardize_names(ds)
-    #deve essere un dataset non un datarray con tutte le variabili cosi possiamo chiamare var= ds['']
-
+    with open(config_file, 'r') as file:
+        config_file = yaml.safe_load(file)
+    
+    file_path = config_file['file_paths']['experiment_dataset']
+    
+    ds = xr.open_dataset(file_path)
+    ds = standardize_names(ds, standard_names)
+    
     return ds
 
+def standardize_names(ds, standard_names):
+    """
+    Checks the variable names in a dataset and asks the user to modify them
+    if they do not conform to the defined standards.
+    
+    Parameters:
+    -----------
+    ds : xarray.Dataset
+        The dataset containing the variables to be checked.
+    
+    standard_names : dict
+        A dictionary with standard variable names.
+    
+    Returns:
+    --------
+    ds : xarray.Dataset
+        The dataset with standardized variable names.
+    """
+    print("Standard variable names:", list(standard_names.keys()))
 
-def standardize_names(ds):
-    """
-    standardizes variable and coordinate names
-    """
+    for var_name in ds.variables:
+        if var_name not in standard_names:
+            print(f"Warning: the variable '{var_name}' is not recognized in the standard dictionary.")
+            new_name = input(f"Do you want to rename it? Enter the correct name (press enter to leave unchanged): ")
+            if new_name:
+                ds = ds.rename({var_name: new_name})
+                print(f"Variable '{var_name}' renamed to '{new_name}'.")
+            else:
+                print(f"Variable '{var_name}' left unchanged.")
+    
     return ds
 
 def check_data(ds, piok):
     if len(ds["time"]) != len(piok["time"]):
         raise ValueError("Error: The 'time' columns in 'ds' and 'piok' must have the same length. To fix use variable 'time_range' of the function")
     return
-
-######################################################################################
-#### Aux functions
 
 def ref_clim(config, allvars): 
 
@@ -233,86 +296,65 @@ def ref_clim(config, allvars):
     piok=climatology()
     return piok
 
-
 def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climatology=True, time_chunk=12):
     """
     Computes the preindustrial (PI) climatology or running mean for a given variable or set of variables.
-
-    The function handles the loading and processing of kernels (either HUANG or ERA5) and calculates the PI climatology 
-    or running mean depending on the specified parameters. The output can be used for anomaly calculations 
+    The function handles the loading and processing of kernels (either HUANG or ERA5) and calculates the PI climatology
+    or running mean depending on the specified parameters. The output can be used for anomaly calculations
     or climate diagnostics.
-
     Parameters:
     -----------
-
     filin_pi : str
-        Template path for the preindustrial data NetCDF files, with a placeholder for the variable name. 
+        Template path for the preindustrial data NetCDF files, with a placeholder for the variable name.
         Example: `'/path/to/files/{}_data.nc'`.
-            
-    
     cart_k : str
         Path to the directory containing kernel dataset files.
-    
     allkers  : dict
         Dictionary containing radiative kernels for different conditions (e.g., 'clr', 'cld').
-
     allvars : str
-        The variable name(s) to process. For example, `'alb'` for albedo or specific flux variables 
+        The variable name(s) to process. For example, `'alb'` for albedo or specific flux variables
         (e.g., `'rsus'`, `'rsds'`).
-
     use_climatology : bool, optional (default=True)
         If True, computes the mean climatology over the entire time period.
         If False, computes a running mean (e.g., 252-month moving average) over the selected time period.
-
     time_chunk : int, optional (default=12)
         Time chunk size for processing data with Xarray. Optimizes memory usage for large datasets.
-
     Returns:
     --------
     piok : xarray.DataArray
         The computed PI climatology or running mean of the specified variable(s), regridded to match the kernel's spatial grid.
-
     Notes:
     ------
-    - For albedo ('alb'), the function computes it as `rsus / rsds` using the provided PI files for surface upward 
+    - For albedo ('alb'), the function computes it as `rsus / rsds` using the provided PI files for surface upward
       (`rsus`) and downward (`rsds`) shortwave radiation.
     - If `use_climatology` is False, the function computes a running mean for the selected time period (e.g., years 2540-2689).
     - Kernels are loaded or preprocessed from `cart_k` and stored in `cart_out`. Supported kernels are HUANG and ERA5.
-
-    """  
-
+    """
     k=allkers[('cld', 't')]
-
     pimean = dict()
     if allvars=='alb':
-        allvars='rsus rsds'.split()
-        for vnam in allvars:
+        allvar='rsus rsds'.split()
+        for vnam in allvar:
             filist = glob.glob(filin_pi.format(vnam))
             filist.sort()
-
             var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
             if time_range is not None:
                 var = var.sel(time = slice(time_range[0], time_range[1]))
-            if use_climatology:
+            if use_climatology==True:
                 var_mean = var.groupby('time.month').mean()
                 var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
                 pimean[vnam] = var_mean[vnam]
             else:
-                piok[vnam] = ctl.regrid_dataset(var[vnam], k.lat, k.lon)
-
-        if use_climatology:
-            piok = pimean[('rsus')]/pimean[('rsds')]
-        else:
-            piok = piok[('rsus')]/piok[('rsds')]
+                pimean[vnam] = ctl.regrid_dataset(var[vnam], k.lat, k.lon)
+        piok = pimean[('rsus')]/pimean[('rsds')]
+        if use_climatology==False:
             piok = ctl.running_mean(piok, 252)
-
     else:
         filist = glob.glob(filin_pi.format(allvars))
         filist.sort()
         var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
         if time_range is not None:
             var = var.sel(time = slice(time_range[0], time_range[1]))
-
         if use_climatology:
             var_mean = var.groupby('time.month').mean()
             var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
@@ -320,10 +362,7 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climat
         else:
             piok = ctl.regrid_dataset(var[allvars], k.lat, k.lon)
             piok = ctl.running_mean(piok, 252)
-        
     return piok
-     
-
 
 ##calcolare tropopausa (Reichler 2003) 
 
