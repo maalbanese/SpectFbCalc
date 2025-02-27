@@ -1,21 +1,60 @@
+# ece4:
+# kernels:
+#     era5:
+#       path_input: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang_ERA5/"
+#       path_output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_ERA5/ece4/s003/"
+#       filename_template: "ERA5_kernel_{}_TOA.nc"
+#     huang:
+#       path_input: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang/toa/"
+#       path_output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_Huang/ece4/s003/"
+#       filename_template: "RRTMG_{}_toa_{}_highR.nc"
+
+# file_paths:
+#    reference_dataset: "/work/users/malbanese/radspesoft/SpectFbCalc_m/ece4/std_sim/oifs/s000_atm_cmip6_1m_*.nc"
+#    reference_dataset_pl: "/work/users/malbanese/radspesoft/SpectFbCalc_m/ece4/std_sim/oifs/s000_atm_cmip6_pl_*.nc"
+#    experiment_dataset: "/work/users/malbanese/radspesoft/SpectFbCalc_m/ece4/t_sim/s003/oifs/s003_atm_cmip6_1m_*.nc"
+#    experiment_dataset2: "" #if you need a second dataset, specify it here 
+#    experiment_dataset_pl: "/work/users/malbanese/radspesoft/SpectFbCalc_m/ece4/t_sim/s003/oifs/s003_atm_cmip6_pl_*.nc"
+#    pressure_data: "/work/users/malbanese/radspesoft/SpectFbCalc_m/ece4/t_sim/s003/oifs/s003_atm_cmip6_1m_*.nc" #to specify if you have ps values in a different file and not in an array
+#    output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_ERA5/ece4/s003/"
+
+# use_climatology: True
+# use_ds_climatology: True
+# time_range:
+#    start: "1990-01-01"
+#    end: "2001-12-31"
+# time_range_exp:
+#    start: ""
+#    end: ""
+# time_chunk: 12
+
+
+#ece3
 kernels:
   era5:
-    path_input: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang_ERA5/toa/RRTMG_{}_toa_{}_highR.nc"
-    path_output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_ERA5/"
+    path_input: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang_ERA5/"
+    path_output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_ERA5/ece3/pila/feedbacks/"
     filename_template: "ERA5_kernel_{}_TOA.nc"
   huang:
-    path_input: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang/toa/RRTMG_{}_toa_{}_highR.nc"
-    path_output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_Huang/"
+    path_input: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang/toa/"
+    path_output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_Huang/ece3/pila/"
     filename_template: "RRTMG_{}_toa_{}_highR.nc"
 
 file_paths:
-  reference_dataset: "/work/users/malbanese/radspesoft/SpectFbCalc_m/std_sim/oifs/s000_atm_cmip6_1m_*_regridded.nc"
-  experiment_dataset: "/work/users/malbanese/radspesoft/SpectFbCalc_m/t_sim/s003/oifs/s003_atm_cmip6_1m_*_regridded.nc"
-  pressure_level: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/Huang/toa/dp.nc"
-  pressure_data: "/work/users/malbanese/radspesoft/SpectFbCalc_m/std_sim/oifs" 
+  reference_dataset: "/work/users/malbanese/radspesoft/SpectFbCalc_m/ece3/pi/std_sim/tpa1/tpa1*.nc"
+  reference_dataset_pl: ""
+  experiment_dataset: "/work/users/malbanese/radspesoft/SpectFbCalc_m/ece3/pi/t_sim/pila/pila*.nc"
+  experiment_dataset2: "" #if you need a second dataset, specify it here 
+  experiment_dataset_pl: ""
+  pressure_data: "/work/users/malbanese/radspesoft/SpectFbCalc_m/kernels/ps_ece3/ps_Amon_EC-Earth3_stabilization-hist-1990_r1i1p1f1_gr_199?01-199?12.nc" #to specify if you have ps values in a different file and not in an array
+  output: "/work/users/malbanese/radspesoft/SpectFbCalc_m/output/rad_ERA5/ece3/pila/feedbacks/"
 
-use_climatology: true
+use_climatology: True
+use_ds_climatology: False
 time_range:
-  start: "1990-01-01"
-  end: "2001-12-31"
+  start: "1850-01-01"
+  end: "1853-12-31"
+time_range_exp:
+  start: ""
+  end: ""
 time_chunk: 12
