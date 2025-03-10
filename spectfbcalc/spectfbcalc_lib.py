@@ -285,25 +285,23 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climat
 
     pimean = dict()
     if allvars=='alb':
-        allvars='rsus rsds'.split()
-        for vnam in allvars:
+        allvar='rsus rsds'.split()
+        for vnam in allvar:
             filist = glob.glob(filin_pi.format(vnam))
             filist.sort()
 
             var = xr.open_mfdataset(filist, chunks = {'time': time_chunk}, use_cftime=True)
             if time_range is not None:
                 var = var.sel(time = slice(time_range[0], time_range[1]))
-            if use_climatology:
+            if use_climatology==True:
                 var_mean = var.groupby('time.month').mean()
                 var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
                 pimean[vnam] = var_mean[vnam]
             else:
-                piok[vnam] = ctl.regrid_dataset(var[vnam], k.lat, k.lon)
+                pimean[vnam] = ctl.regrid_dataset(var[vnam], k.lat, k.lon)
 
-        if use_climatology:
-            piok = pimean[('rsus')]/pimean[('rsds')]
-        else:
-            piok = piok[('rsus')]/piok[('rsds')]
+        piok = pimean[('rsus')]/pimean[('rsds')]
+        if use_climatology==False:
             piok = ctl.running_mean(piok, 252)
 
     else:
@@ -506,11 +504,13 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
         cos="_21yearmean"
 
     if time_range is not None:
-        ds['ts'] = ds['ts'].sel(time = slice(time_range[0], time_range[1]))
-    var = ctl.regrid_dataset(ds['ts'], k.lat, k.lon)   
+        var = ds['ts'].sel(time = slice(time_range[0], time_range[1]))
+        var=ctl.regrid_dataset(var, k.lat, k.lon)
+    else:
+        var = ctl.regrid_dataset(ds['ts'], k.lat, k.lon)   
 
     if use_climatology == False:
-        check_data(ds['ts'], piok['ts'])
+        check_data(var, piok['ts'])
         piok=piok['ts'].drop('time')
         piok['time'] = var['time']
         piok = piok.chunk(var.chunks)
@@ -604,13 +604,16 @@ def Rad_anomaly_planck_atm_lr(ds, piok, cart_out:str, ker:str, allkers, surf_pre
         cos="_21yearmean"
 
     if time_range is not None:
-        ds['ta'] = ds['ta'].sel(time = slice(time_range[0], time_range[1])) 
-        ds['ts'] = ds['ts'].sel(time = slice(time_range[0], time_range[1])) 
-    var = ctl.regrid_dataset(ds['ta'], k.lat, k.lon)
-    var_ts = ctl.regrid_dataset(ds['ts'], k.lat, k.lon)
+        var = ds['ta'].sel(time = slice(time_range[0], time_range[1])) 
+        var_ts = ds['ts'].sel(time = slice(time_range[0], time_range[1])) 
+        var=ctl.regrid_dataset(var, k.lat, k.lon)
+        var_ts=ctl.regrid_dataset(var_ts, k.lat, k.lon)
+    else:
+        var = ctl.regrid_dataset(ds['ta'], k.lat, k.lon)
+        var_ts = ctl.regrid_dataset(ds['ts'], k.lat, k.lon)
 
     if use_climatology==False:
-        check_data(ds['ta'], piok['ta'])
+        check_data(var, piok['ta'])
         piok_ta=piok['ta'].drop('time')
         piok_ta['time'] = var['time']
         piok_ts=piok['ts'].drop('time')
@@ -803,18 +806,19 @@ def Rad_anomaly_wv(ds, piok,  cart_out:str, ker:str, allkers, surf_pressure, tim
     else:
         cos="_21yearmean"
 
-    
+    var=ds['hus']
+    var_ta=ds['ta']
     if time_range is not None:
-        ds['hus'] = ds['hus'].sel(time = slice(time_range[0], time_range[1])) 
-        ds['ta'] = ds['ta'].sel(time = slice(time_range[0], time_range[1]))
-    var = ctl.regrid_dataset(ds['hus'], k.lat, k.lon)
-    mask=mask_atm(ds['ta'])
+        var = ds['hus'].sel(time = slice(time_range[0], time_range[1])) 
+        var_ta = ds['ta'].sel(time = slice(time_range[0], time_range[1]))
+    var = ctl.regrid_dataset(var, k.lat, k.lon)
+    mask=mask_atm(var_ta)
 
     Rv = 487.5 # gas constant of water vapor
     Lv = 2.5e+06 # latent heat of water vapor
 
     if use_climatology==False:
-        check_data(ds['ta'], piok['ta'])
+        check_data(var_ta, piok['ta'])
         piok_hus=piok['hus'].drop('time')
         piok_hus['time'] = var['time']
         piok_ta=piok['ta'].drop('time')
@@ -915,6 +919,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
         Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, use_climatology, time_range)
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
+    
     if not os.path.exists(path):
         Rad_anomaly_wv(ds, piok, cart_out, ker, allkers, surf_pressure, time_range, use_climatology)    
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
