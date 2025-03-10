@@ -30,7 +30,6 @@ def mytestfunction():
     return
 
 ###### LOAD KERNELS
-
 def load_spectral_kernel(config_file):
 
     ## per ste
@@ -225,7 +224,6 @@ def load_kernel(ker, config_file: str):
     return allkers
 
 ###### LOAD AND CHECK DATA
-
 standard_names = {
     "rsus": "surface upwelling shortwave radiation",
     "rsds": "surface downwelling shortwave radiation",
@@ -393,7 +391,6 @@ def check_data(ds, piok):
 
 ######################################################################################
 #### Aux functions
-
 def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
     """
     Computes the reference climatology using the provided configuration, variables, and kernel data.
@@ -553,7 +550,6 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climat
     return piok
 
 ##tropopause computation (Reichler 2003) 
-
 def mask_atm(var):
     """
     Generates a mask for atmospheric temperature data based on the lapse rate threshold.
@@ -579,7 +575,6 @@ def mask_atm(var):
     return mask
 
 ### Mask for surf pressure
-
 def mask_pres(surf_pressure, cart_out:str, allkers, config_file=None):
     """
     Computes a "width mask" for atmospheric pressure levels based on surface pressure and kernel data.
@@ -856,7 +851,6 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
     return(radiation)
 
 #PLANK-ATMO AND LAPSE RATE WITH VARYING TROPOPAUSE
-
 def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     """
     Wrapper for Rad_anomaly_planck_atm_lr function, which upload automatically the dataset,
@@ -1078,7 +1072,6 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     return(radiation)
 
 #ALBEDO
-
 def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
     """
     Wrapper for Rad_anomaly_albedo function, which upload automatically the dataset,
@@ -1218,7 +1211,6 @@ def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, use_climatology=True, t
     return(radiation)
 
 #W-V COMPUTATION
-
 def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     """
     Wrapper for Rad_anomaly_wv function, which upload automatically the dataset,
@@ -1421,6 +1413,94 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         
     return radiation
 
+#ALL RAD_ANOM COMPUTATION
+def calc_anoms_wrapper(config_file: str, ker, standard_names):
+    """
+   
+    """
+    print("Kernel upload...")
+    allkers = load_kernel(ker, config_file)
+    print("Dataset to analyze upload...")
+    ds = read_data(config_file, standard_names)
+    print("Variables to consider upload...")
+    allvars = 'ts tas hus alb ta'.split()
+    allvars1= 'rlutcs rsutcs rlut rsut'.split()
+    print("Read parameters from configuration file...")
+
+    if isinstance(config_file, str):
+        with open(config_file, 'r') as file:
+            config = yaml.safe_load(file)
+    else:
+        config = config_file 
+    
+    cart_out = config['file_paths'].get("output")
+    use_climatology = config.get("use_climatology", True)  # Default True
+    use_ds_climatology = config.get("use_ds_climatology", True)
+
+    time_range_clim = config.get("time_range", {})
+    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
+   
+    time_range_exp = config.get("time_range_exp", {})
+    time_range_exp = (time_range_exp.get("start"), time_range_exp.get("end"))
+    # If empty time range put none
+    time_range_clim = time_range_clim if all(time_range_clim) else None
+    time_range_exp = time_range_exp if all(time_range_exp) else None
+    # If `time_range_exp` is defined use it, otherwise use `time_range`
+    time_range_to_use = time_range_exp if time_range_exp else time_range_clim
+
+    print(f"Time range used for the simulation analysis: {time_range_to_use}")
+
+    # Surface pressure management
+    surf_pressure = None
+    if ker == 'HUANG':  # HUANG requires surface pressure
+        pressure_path = config['file_paths'].get('pressure_data', None)
+        
+        if pressure_path:  # If pressure data is specified, load it
+            print("Loading surface pressure data...")
+            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
+            if not ps_files:
+                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
+            
+            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
+            surf_pressure = standardize_names(surf_pressure, standard_names)
+        else:
+            print("Using surface pressure passed as an array.")
+
+    print("Upload reference climatology for Rad anomaly...")
+    ref_clim_data_1 = ref_clim(config_file, allvars, ker, standard_names, allkers=allkers) 
+    
+    anoms = calc_anoms(ds, ref_clim_data_1, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file)
+
+    return (anoms)
+
+def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=True, config_file =None):
+    """
+    
+    """
+
+    if use_climatology==True:
+        cos="_climatology"
+    else:
+        cos="_21yearmean"
+
+    print('planck surf')
+    path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+cos+"-"+ker+"kernels.nc")
+    if not os.path.exists(path):
+        anom_ps = Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
+    print('planck atm')
+    path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
+    if not os.path.exists(path):
+        anom_pal = Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
+    print('albedo')
+    path = os.path.join(cart_out, "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
+    if not os.path.exists(path):
+        anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
+    print('w-v')
+    path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
+    if not os.path.exists(path):
+        anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)  
+
+    return anom_ps, anom_pal, anom_a, anom_wv 
 
 ##FEEDBACK COMPUTATION
 def calc_fb_wrapper(config_file: str, ker, standard_names):
