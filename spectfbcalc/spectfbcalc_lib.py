@@ -13,6 +13,7 @@ import re
 import numpy as np
 import xarray as xr
 import pandas as pd
+
 from climtools import climtools_lib as ctl
 from matplotlib import pyplot as plt
 import matplotlib.cbook as cbook
@@ -1504,39 +1505,29 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatol
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        radiation.update(Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology))
+        anom_ps = Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
     else:
-        radiation[('cld', 'planck-surf')]=xr.open_mfdataset(cart_out+ "dRt_planck-surf_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'planck-surf')]=xr.open_mfdataset(cart_out+ "dRt_planck-surf_global_clr"+cos+"-"+ker+"kernels.nc")
-
+        anom_ps = xr.open_dataset(path)
     print('planck atm')
     path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        radiation.update(Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology))
+        anom_pal = Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
     else:
-        radiation[('cld', 'planck-atmo')]=xr.open_mfdataset(cart_out+ "dRt_planck-atmo_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'planck-atmo')]=xr.open_mfdataset(cart_out+ "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
-        radiation[('cld', 'lapse-rate')]=xr.open_mfdataset(cart_out+ "dRt_lapse-rate_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'lapse-rate')]=xr.open_mfdataset(cart_out+ "dRt_lapse-rate_global_clr"+cos+"-"+ker+"kernels.nc")
-
+        anom_pal = xr.open_dataset(path)
     print('albedo')
     path = os.path.join(cart_out, "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        radiation.update(Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology))
+        anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
     else:
-        radiation[('cld', 'albedo')]=xr.open_mfdataset(cart_out+ "dRt_albedo_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'albedo')]=xr.open_mfdataset(cart_out+ "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
-
-    
+        anom_a = xr.open_dataset(path)
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        radiation.update( Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology) )
+        anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
     else:
-        radiation[('cld', 'water-vapor')]=xr.open_mfdataset(cart_out+ "dRt_water-vapor_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'water-vapor')]=xr.open_mfdataset(cart_out+ "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
+        anom_wv = xr.open_dataset(path)  
 
-    return radiation
+    return anom_ps, anom_pal, anom_a, anom_wv 
 
 ##FEEDBACK COMPUTATION
 def calc_fb_wrapper(config_file: str, ker, standard_names):
