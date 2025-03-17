@@ -12,6 +12,7 @@ import re
 
 import numpy as np
 import xarray as xr
+import pandas as pd
 
 from climtools import climtools_lib as ctl
 from matplotlib import pyplot as plt
@@ -810,8 +811,6 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
 
     if time_range is not None:
         var = ds['ts'].sel(time=slice(time_range[0], time_range[1]))
-        var=ctl.regrid_dataset(var, k.lat, k.lon)
-    else:
     
     var = ctl.regrid_dataset(ds['ts'], k.lat, k.lon)  
 
@@ -1503,18 +1502,26 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatol
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
         anom_ps = Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
+    else:
+        anom_ps = xr.open_dataset(path)
     print('planck atm')
     path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
         anom_pal = Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
+    else:
+        anom_pal = xr.open_dataset(path)
     print('albedo')
     path = os.path.join(cart_out, "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
         anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
+    else:
+        anom_a = xr.open_dataset(path)
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)  
+        anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
+    else:
+        anom_wv = xr.open_dataset(path)  
 
     return anom_ps, anom_pal, anom_a, anom_wv 
 
