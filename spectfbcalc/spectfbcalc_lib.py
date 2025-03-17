@@ -37,7 +37,7 @@ def load_spectral_kernel(config_file):
 
     return allkers
 
-def load_kernel_ERA5(config_file):
+def load_kernel_ERA5(cart_k, cart_out, finam):
     """
     Loads and preprocesses ERA5 kernels for further analysis.
 
@@ -77,15 +77,6 @@ def load_kernel_ERA5(config_file):
 
     """
 
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file  
-
-    cart_k = config['kernels']['era5']['path_input']
-    cart_out = config['kernels']['era5']['path_output']
-    finam = config['kernels']['era5']['filename_template']
 
     vnams = ['ta_dp', 'ts', 'wv_lw_dp', 'wv_sw_dp', 'alb']
     tips = ['clr', 'cld']
@@ -118,7 +109,7 @@ def load_kernel_ERA5(config_file):
     pickle.dump(cose, open(cart_out + 'cose_ERA5.p', 'wb'))
     return allkers
 
-def load_kernel_HUANG(config_file):
+def load_kernel_HUANG(cart_k, cart_out, finam):
     """
     Loads and processes climate kernel datasets (from HUANG 2017), and saves specific datasets to pickle files.
 
@@ -144,15 +135,6 @@ def load_kernel_HUANG(config_file):
       - `cose.p`: A scaled version (100x) of the 'player' variable from the vertical levels data.
     """
 
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-
-    cart_k = config['kernels']['huang']['path_input']
-    cart_out = config['kernels']['huang']['path_output']
-    finam = config['kernels']['huang']['filename_template']
 
     vnams = ['t', 'ts', 'wv_lw', 'wv_sw', 'alb']
     tips = ['clr', 'cld']
@@ -180,7 +162,7 @@ def load_kernel_HUANG(config_file):
 
     return allkers
 
-def load_kernel(ker, config_file: str):
+def load_kernel_wrapper(ker, config_file: str):
     """
     Loads and processes climate kernel datasets, and saves specific datasets to pickle files.
 
@@ -218,9 +200,25 @@ def load_kernel(ker, config_file: str):
         config = config_file 
 
     if ker=='ERA5':
-        allkers=load_kernel_ERA5(config)
+        cart_k = config['kernels']['era5']['path_input']
+        cart_out = config['kernels']['era5']['path_output']
+        finam = config['kernels']['era5']['filename_template']
+
     if ker=='HUANG':
-        allkers=load_kernel_HUANG(config)
+       cart_k = config['kernels']['huang']['path_input']
+       cart_out = config['kernels']['huang']['path_output']
+       finam = config['kernels']['huang']['filename_template']
+    
+     
+    allkers = load_kernel(ker, cart_k, cart_out, finam)
+
+    return allkers
+
+def load_kernel(ker, cart_k, cart_out, finam):
+    if ker=='ERA5':
+         allkers=load_kernel_ERA5(cart_k, cart_out, finam)
+    if ker=='HUANG':
+         allkers=load_kernel_HUANG(cart_k, cart_out, finam)
 
     return allkers
 
@@ -277,13 +275,13 @@ def read_data(config_file: str, standard_names):
         raise ValueError("Error: The 'experiment_dataset' path is not specified in the configuration file")
 
     
-    ds_list = [xr.open_mfdataset(file_path1, combine='by_coords', chunks={'time': time_chunk})]
+    ds_list = [xr.open_mfdataset(file_path1, combine='by_coords', use_cftime=True, chunks={'time': time_chunk})]
  
     if file_path2 and file_path2.strip():
-        ds_list.append(xr.open_mfdataset(file_path2, combine='by_coords', chunks={'time': time_chunk}))
+        ds_list.append(xr.open_mfdataset(file_path2, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
 
     if file_pathpl and file_pathpl.strip():
-        ds_list.append(xr.open_mfdataset(file_pathpl, combine='by_coords',  chunks={'time': time_chunk}))
+        ds_list.append(xr.open_mfdataset(file_pathpl, combine='by_coords', use_cftime=True,  chunks={'time': time_chunk}))
 
     # Merge dataset
     ds = xr.merge(ds_list, compat="override")
@@ -402,7 +400,7 @@ def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
         The path to the YAML configuration file.
     allvars : str
         The variable to process (e.g., 'alb', 'rsus').
-    kers : dict
+    ker : dict
         The preprocessed kernels.
     standard_names : dict
         A dictionary containing the standard names for variables.
@@ -427,10 +425,10 @@ def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
     if not filin_pi:
         raise ValueError("Error: the 'reference_dataset' path is not specified in the configuration file.")
 
-    ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', chunks={'time': time_chunk})]
+    ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', use_cftime=True, chunks={'time': time_chunk})]
     
     if filin_pi_pl and filin_pi_pl.strip():
-        ds_list.append(xr.open_mfdataset(filin_pi_pl, combine='by_coords', chunks={'time': time_chunk}))
+        ds_list.append(xr.open_mfdataset(filin_pi_pl, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
 
     ds_ref = xr.merge(ds_list, compat="override")
 
@@ -736,7 +734,7 @@ def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, standard_names):
     """
 
     print("Kernel upload...")
-    allkers = load_kernel(ker, config_file)
+    allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, standard_names)
     print("Variables to consider upload...")
@@ -811,8 +809,10 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
 
     if time_range is not None:
         var = ds['ts'].sel(time=slice(time_range[0], time_range[1]))
-    
-    var = ctl.regrid_dataset(ds['ts'], k.lat, k.lon)  
+        var=ctl.regrid_dataset(var, k.lat, k.lon)
+    else:
+        var=ds['ts']
+        var = ctl.regrid_dataset(ds['ts'], k.lat, k.lon)  
 
     if use_ds_climatology == False:
         if use_climatology == False:
@@ -882,7 +882,7 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     """
 
     print("Kernel upload...")
-    allkers = load_kernel(ker, config_file)
+    allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, standard_names)
     print("Variables to consider upload...")
@@ -992,8 +992,10 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         var=ctl.regrid_dataset(var, k.lat, k.lon)
         var_ts=ctl.regrid_dataset(var_ts, k.lat, k.lon)
     else:
-        var = ctl.regrid_dataset(ds['ta'], k.lat, k.lon)
-        var_ts = ctl.regrid_dataset(ds['ts'], k.lat, k.lon)
+        var=ds['ta']
+        var_ts=ds['ts']
+        var = ctl.regrid_dataset(var, k.lat, k.lon)
+        var_ts = ctl.regrid_dataset(var_ts, k.lat, k.lon)
 
     if use_ds_climatology == False:
         if use_climatology==False:
@@ -1106,7 +1108,7 @@ def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
     """
 
     print("Kernel upload...")
-    allkers = load_kernel(ker, config_file)
+    allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, standard_names)
     print("Variables to consider upload...")
@@ -1245,7 +1247,7 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     """
 
     print("Kernel upload...")
-    allkers = load_kernel(ker, config_file)
+    allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, standard_names)
     print("Variables to consider upload...")
@@ -1350,6 +1352,7 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         var = ds['hus'].sel(time = slice(time_range[0], time_range[1])) 
         var_ta = ds['ta'].sel(time = slice(time_range[0], time_range[1]))
     var = ctl.regrid_dataset(var, k.lat, k.lon)
+    var_ta = ctl.regrid_dataset(var_ta, k.lat, k.lon)
     mask=mask_atm(var_ta)
 
     Rv = 487.5 # gas constant of water vapor
@@ -1434,12 +1437,12 @@ def calc_anoms_wrapper(config_file: str, ker, standard_names):
    
     """
     print("Kernel upload...")
-    allkers = load_kernel(ker, config_file)
+    allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, standard_names)
     print("Variables to consider upload...")
     allvars = 'ts tas hus alb ta'.split()
-    allvars1= 'rlutcs rsutcs rlut rsut'.split()
+    #allvars1= 'rlutcs rsutcs rlut rsut'.split()
     print("Read parameters from configuration file...")
 
     if isinstance(config_file, str):
@@ -1482,17 +1485,18 @@ def calc_anoms_wrapper(config_file: str, ker, standard_names):
             print("Using surface pressure passed as an array.")
 
     print("Upload reference climatology for Rad anomaly...")
-    ref_clim_data_1 = ref_clim(config_file, allvars, ker, standard_names, allkers=allkers) 
-    
+    ref_clim_data_1=dict()
+    ref_clim_data_1 = ref_clim(config_file, allvars, ker, standard_names, allkers) 
+    anoms=dict()
     anoms = calc_anoms(ds, ref_clim_data_1, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file)
 
     return (anoms)
 
-def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=True, config_file =None):
+def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=False, config_file =None):
     """
     
     """
-
+    radiation=dict()
     if use_climatology==True:
         cos="_climatology"
     else:
@@ -1546,7 +1550,7 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
    
     """
     print("Kernel upload...")
-    allkers = load_kernel(ker, config_file)
+    allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, standard_names)
     print("Variables to consider upload...")
@@ -1686,7 +1690,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
 def feedback_cloud_wrapper(config_file: str, ker, standard_names):
 
     print("Kernel upload...")
-    allkers = load_kernel(ker, config_file)
+    allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, standard_names)
     print("Variables to consider upload...")
