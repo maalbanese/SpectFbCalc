@@ -3,24 +3,19 @@
 
 ## Description
 This software is designed to calculate, analyse and visualize radiance anomalies and radiative feedbacks using synthetic kernels and variations in climate model parameters. 
-(It aims to assist in validating the EC-Earth climate model, particularly through comparison with IASI measurements and using the σ-IASI radiative transfer model.)
-SpectFbCalc is a Python-based tool designed for calculating radiative anomalies and feedbacks using synthetic kernels and climate model outputs. The software facilitates the analysis of radiative biases and explores the impact of parameter tuning on climate model performance, particularly within the EC-Earth climate model.
+
+SpectFbCalc is a Python-based tool designed for calculating radiative anomalies and climate feedbacks using synthetic kernels and climate model outputs. The software facilitates the analysis of radiative biases and explores the impact of parameter tuning on climate model performance and sensitivity.
 
 ## Motivation
-The project aims to trace spectral anomalies in radiances back to their contributing atmospheric variables.  
-By leveraging outputs from the EC-Earth model this work seeks to: 
-1. Reverse-engineer the simulator's results.
-2. Analyze how variations in individual climate variables influence spectral biases. 
-3. Improve the tuning of climate models and enhance the understanding of biases in simulated radiances.
-Ultimately, the tool provide insights into improving the tuning of climate models and understanding biases in simulated radiances.
+1. Analyze how variations in individual climate variables influence radiative biases and climate feedbacks. 
+2. Improve the tuning of climate models and enhance the understanding of biases in simulated radiances.
 
 ## Features
-- Kernel-based radiative feedback computation: uses both broadband and spectral kernels togheter with anomalies to analyze radiative feedbacks and radiance anomalies.
-- Data handling and standardization: functions for reading and standardizing datasets.
-- Modular architecture: core calculations are implemented in reusable functions for flexibility and maintainability.
-- Compatibility with EC-Earth simulations: designed to assess radiative anomalies from EC-Earth experiments and it handles multiple datasets from different EC-Earth versions.
-- Configurable setup: allows defining paths, kernels, and datasets using a YAML configuration file.
-- Collaborative development workflow: a structured git branch-based system for version control and contributions.
+- Kernel-based radiative feedback computation: uses both broadband and spectral kernels
+- Compatibility with CMIP6 standard CMOR output and specific output from EC-Earth3/4 simulations
+- Configurable setup: allows defining paths, kernels, and datasets using a YAML configuration file
+- Data handling and standardization: functions for reading and standardizing datasets
+- Modular architecture: core calculations are implemented in reusable functions
 
 ## Repository Structure
 ```
