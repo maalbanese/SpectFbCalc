@@ -1,4 +1,6 @@
-# EC-Earth Model performance validation thanks to radiance anomalies analysis and radiative feedbacks calculation 
+# SpectFbCalc
+### Tools for the calculation of radiative feedbacks and sensitivities, both broad-band and spectrally-resolved
+
 ## Description
 This software is designed to calculate, analyse and visualize radiance anomalies and radiative feedbacks using synthetic kernels and variations in climate model parameters. 
 (It aims to assist in validating the EC-Earth climate model, particularly through comparison with IASI measurements and using the σ-IASI radiative transfer model.)
