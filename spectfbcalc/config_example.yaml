@@ -14,13 +14,13 @@ file_paths:
    reference_dataset_pl: "/path/to/reference_data/level_pressure"
    experiment_dataset: "/path/to/experiment_data/"
    experiment_dataset2: "" #if you need a second experiment dataset, specify it here 
-   experiment_dataset_pl: "/path/to/experiment_data/level_pressure""
+   experiment_dataset_pl: "/path/to/experiment_data/level_pressure"
    pressure_data: "" #to specify if you have ps values in a different file and not in an array
    output: "/path/to/output/"
 
 use_climatology: True
 use_ds_climatology: True
-time_range:
+time_range: 
    start: ""
    end: ""
 time_range_exp:

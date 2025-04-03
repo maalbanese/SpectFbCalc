@@ -13,6 +13,7 @@ import re
 import numpy as np
 import xarray as xr
 import pandas as pd
+
 from climtools import climtools_lib as ctl
 from matplotlib import pyplot as plt
 import matplotlib.cbook as cbook
@@ -77,8 +78,6 @@ def load_kernel_ERA5(cart_k, cart_out, finam):
     - This function uses the Xarray library to handle datasets and Pickle to save processed data.
 
     """
-
-
     vnams = ['ta_dp', 'ts', 'wv_lw_dp', 'wv_sw_dp', 'alb']
     tips = ['clr', 'cld']
     allkers = dict()
@@ -135,8 +134,6 @@ def load_kernel_HUANG(cart_k, cart_out, finam):
       - `k.p`: The longwave kernel data corresponding to cloudy-sky temperature ('cld', 't').
       - `cose.p`: A scaled version (100x) of the 'player' variable from the vertical levels data.
     """
-
-
     vnams = ['t', 'ts', 'wv_lw', 'wv_sw', 'alb']
     tips = ['clr', 'cld']
     allkers = dict()
@@ -372,9 +369,14 @@ def standardize_names(ds, standard_names):
             ds['rlutcs'] = -ds['rlntcs']
 
     if 'rsus' not in ds.variables and 'ssr' in all_vars and 'rsds' in all_vars:
-        response = input("Missing 'rsus'. You can calculate it as 'rsus = ssr - rsds'. Do you want to do that? (y/n): ")
+        response = input("Missing 'rsus'. You can calculate it as 'rsus = rsds - ssr'. Do you want to do that? (y/n): ")
         if response.lower() == 'y':
-            ds['rsus'] = ds['ssr'] - ds['rsds']
+            ds['rsus'] = ds['rsds'] - ds['ssr']
+    
+    if 'rsutcs' not in ds.variables and 'rsut' in all_vars and 'tsrc' in all_vars and 'tsr' in all_vars:
+        response = input("Missing 'rsutcs'. You can calculate it as 'rsutcs = rsut x (tsrc/tsr)'. Do you want to do that? (y/n): ")
+        if response.lower() == 'y':
+            ds['rsutcs'] = ds['rsut'] * (ds['tsrc']/ds['tsr'])
     
     # Handle tas/ts equivalence
     if 'ts' not in ds.variables and 'tas' in all_vars:
@@ -764,13 +766,10 @@ def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, standard_names):
     use_climatology = bool(use_climatology)
 
     time_range_clim = config.get("time_range", {})
-    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
-   
     time_range_exp = config.get("time_range_exp", {})
-    time_range_exp = (time_range_exp.get("start"), time_range_exp.get("end"))
-    # If empty time range put none
-    time_range_clim = time_range_clim if all(time_range_clim) else None
-    time_range_exp = time_range_exp if all(time_range_exp) else None
+
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
@@ -816,7 +815,7 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
     cos = "_climatology" if use_climatology else "_21yearmean"
 
     if time_range is not None:
-        var = ds['ts'].sel(time=slice(time_range[0], time_range[1]))
+        var = ds['ts'].sel(time=slice(time_range['start'], time_range['end']))
         var=ctl.regrid_dataset(var, k.lat, k.lon)
     else:
         var=ds['ts']
@@ -907,13 +906,10 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     use_climatology = bool(use_climatology)
 
     time_range_clim = config.get("time_range", {})
-    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
-   
     time_range_exp = config.get("time_range_exp", {})
-    time_range_exp = (time_range_exp.get("start"), time_range_exp.get("end"))
-    # If empty time range put none
-    time_range_clim = time_range_clim if all(time_range_clim) else None
-    time_range_exp = time_range_exp if all(time_range_exp) else None
+
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
@@ -989,8 +985,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         cos="_21yearmean"
 
     if time_range is not None:
-        var = ds['ta'].sel(time = slice(time_range[0], time_range[1])) 
-        var_ts = ds['ts'].sel(time = slice(time_range[0], time_range[1])) 
+        var = ds['ta'].sel(time=slice(time_range['start'], time_range['end'])) 
+        var_ts = ds['ts'].sel(time=slice(time_range['start'], time_range['end'])) 
         var=ctl.regrid_dataset(var, k.lat, k.lon)
         var_ts=ctl.regrid_dataset(var_ts, k.lat, k.lon)
     else:
@@ -1128,13 +1124,10 @@ def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
     use_climatology = bool(use_climatology)
 
     time_range_clim = config.get("time_range", {})
-    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
-   
     time_range_exp = config.get("time_range_exp", {})
-    time_range_exp = (time_range_exp.get("start"), time_range_exp.get("end"))
-    # If empty time range put none
-    time_range_clim = time_range_clim if all(time_range_clim) else None
-    time_range_exp = time_range_exp if all(time_range_exp) else None
+
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
@@ -1190,7 +1183,7 @@ def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, use_climatology=True, t
     var = var.fillna(0)
 
     if time_range is not None:
-        var = var.sel(time=slice(time_range[0], time_range[1]))
+        var = var.sel(time=slice(time_range['start'], time_range['end']))
     var = ctl.regrid_dataset(var, k.lat, k.lon)
 
     # Removing inf and nan from alb
@@ -1273,13 +1266,10 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     use_climatology = bool(use_climatology) 
 
     time_range_clim = config.get("time_range", {})
-    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
-   
     time_range_exp = config.get("time_range_exp", {})
-    time_range_exp = (time_range_exp.get("start"), time_range_exp.get("end"))
-    # If empty time range put none
-    time_range_clim = time_range_clim if all(time_range_clim) else None
-    time_range_exp = time_range_exp if all(time_range_exp) else None
+
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
@@ -1353,8 +1343,8 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
     var=ds['hus']
     var_ta=ds['ta']
     if time_range is not None:
-        var = ds['hus'].sel(time = slice(time_range[0], time_range[1])) 
-        var_ta = ds['ta'].sel(time = slice(time_range[0], time_range[1]))
+        var = ds['hus'].sel(time=slice(time_range['start'], time_range['end'])) 
+        var_ta = ds['ta'].sel(time=slice(time_range['start'], time_range['end']))
     var = ctl.regrid_dataset(var, k.lat, k.lon)
     var_ta = ctl.regrid_dataset(var_ta, k.lat, k.lon)
     mask=mask_atm(var_ta)
@@ -1461,16 +1451,12 @@ def calc_anoms_wrapper(config_file: str, ker, standard_names):
     use_ds_climatology = config.get("use_ds_climatology", True)
 
     time_range_clim = config.get("time_range", {})
-    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
-   
     time_range_exp = config.get("time_range_exp", {})
-    time_range_exp = (time_range_exp.get("start"), time_range_exp.get("end"))
-    # If empty time range put none
-    time_range_clim = time_range_clim if all(time_range_clim) else None
-    time_range_exp = time_range_exp if all(time_range_exp) else None
+
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
-
     print(f"Time range used for the simulation analysis: {time_range_to_use}")
 
     # Surface pressure management
@@ -1510,39 +1496,29 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatol
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        radiation.update(Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology))
+        anom_ps = Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
     else:
-        radiation[('cld', 'planck-surf')]=xr.open_mfdataset(cart_out+ "dRt_planck-surf_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'planck-surf')]=xr.open_mfdataset(cart_out+ "dRt_planck-surf_global_clr"+cos+"-"+ker+"kernels.nc")
-
+        anom_ps = xr.open_dataset(path)
     print('planck atm')
     path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        radiation.update(Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology))
+        anom_pal = Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
     else:
-        radiation[('cld', 'planck-atmo')]=xr.open_mfdataset(cart_out+ "dRt_planck-atmo_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'planck-atmo')]=xr.open_mfdataset(cart_out+ "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
-        radiation[('cld', 'lapse-rate')]=xr.open_mfdataset(cart_out+ "dRt_lapse-rate_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'lapse-rate')]=xr.open_mfdataset(cart_out+ "dRt_lapse-rate_global_clr"+cos+"-"+ker+"kernels.nc")
-
+        anom_pal = xr.open_dataset(path)
     print('albedo')
     path = os.path.join(cart_out, "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        radiation.update(Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology))
+        anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
     else:
-        radiation[('cld', 'albedo')]=xr.open_mfdataset(cart_out+ "dRt_albedo_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'albedo')]=xr.open_mfdataset(cart_out+ "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
-
-    
+        anom_a = xr.open_dataset(path)
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        radiation.update( Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology) )
+        anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
     else:
-        radiation[('cld', 'water-vapor')]=xr.open_mfdataset(cart_out+ "dRt_water-vapor_global_cld"+cos+"-"+ker+"kernels.nc")
-        radiation[('clr', 'water-vapor')]=xr.open_mfdataset(cart_out+ "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
+        anom_wv = xr.open_dataset(path)  
 
-    return radiation
+    return anom_ps, anom_pal, anom_a, anom_wv 
 
 ##FEEDBACK COMPUTATION
 def calc_fb_wrapper(config_file: str, ker, standard_names):
@@ -1584,13 +1560,10 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
     use_ds_climatology = config.get("use_ds_climatology", True)
 
     time_range_clim = config.get("time_range", {})
-    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
-   
     time_range_exp = config.get("time_range_exp", {})
-    time_range_exp = (time_range_exp.get("start"), time_range_exp.get("end"))
-    # If empty time range put none
-    time_range_clim = time_range_clim if all(time_range_clim) else None
-    time_range_exp = time_range_exp if all(time_range_exp) else None
+
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
@@ -1724,16 +1697,13 @@ def feedback_cloud_wrapper(config_file: str, ker, standard_names):
     use_ds_climatology = config.get("use_ds_climatology", True)
 
     time_range_clim = config.get("time_range", {})
-    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
-   
     time_range_exp = config.get("time_range_exp", {})
-    time_range_exp = (time_range_exp.get("start"), time_range_exp.get("end"))
-    # If empty time range put none
-    time_range_clim = time_range_clim if all(time_range_clim) else None
-    time_range_exp = time_range_exp if all(time_range_exp) else None
+
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
-
+    
     print(f"Time range used for the simulation analysis: {time_range_to_use}")
 
      # Surface pressure management
