@@ -932,10 +932,10 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
             print("Using surface pressure passed as an array.")
 
     print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
 
     print("Planck-Atmosphere-LapseRate radiative anomaly computing...")
-    radiation = Rad_anomaly_planck_atm_lr(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology)
+    radiation = Rad_anomaly_planck_atm_lr(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology)
 
     return (radiation)
 
@@ -1134,7 +1134,7 @@ def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
     print(f"Time range used for the simulation analysis: {time_range_to_use}")
 
     print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
 
     print("Albedo radiative anomaly computing...")
     radiation = Rad_anomaly_albedo(ds, ref_clim_data, ker, allkers, cart_out, use_climatology, time_range_to_use, use_ds_climatology)
@@ -1292,10 +1292,10 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
             print("Using surface pressure passed as an array.")
 
     print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
 
     print("Water-Vapour radiative anomaly computing...")
-    radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology)
+    radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology)
 
     return (radiation)
 
