@@ -21,9 +21,11 @@ import pickle
 import dask.array as da
 import yaml
 from difflib import get_close_matches
+import dask
 
 ######################################################################
 ### Functions
+dask.config.set(scheduler='single-threaded')
 
 def mytestfunction():
     print('test!')
@@ -274,7 +276,7 @@ def read_data(config_file: str, standard_names):
         raise ValueError("Error: The 'experiment_dataset' path is not specified in the configuration file")
 
     
-    ds_list = [xr.open_mfdataset(file_path1, combine='by_coords', use_cftime=True, chunks={'time': time_chunk})]
+    ds_list = [xr.open_mfdataset(file_path1,  use_cftime=True, chunks={'time': time_chunk})]
  
     if file_path2 and file_path2.strip():
         ds_list.append(xr.open_mfdataset(file_path2, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
@@ -419,12 +421,13 @@ def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
     filin_pi = config['file_paths'].get('reference_dataset', None)
     filin_pi_pl = config['file_paths'].get('reference_dataset_pl', None)
     time_chunk = config.get('time_chunk', None)
-
+    use_climatology = config.get("use_climatology", True)   
+    use_climatology = bool(use_climatology)
     
     if not filin_pi:
         raise ValueError("Error: the 'reference_dataset' path is not specified in the configuration file.")
 
-    ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', use_cftime=True, chunks={'time': time_chunk})]
+    ds_list = [xr.open_mfdataset(filin_pi, use_cftime=True, chunks={'time': time_chunk})]
     
     if filin_pi_pl and filin_pi_pl.strip():
         ds_list.append(xr.open_mfdataset(filin_pi_pl, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
@@ -439,10 +442,12 @@ def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
     
     ds_ref = standardize_names(ds_ref, standard_names)
 
-    time_range_ref = config['time_range']
+    time_range_clim = config.get("time_range", {})
+    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
+    time_range_clim = time_range_clim if all(time_range_clim) else None
 
     if allkers is None:  
-        allkers = load_kernel(ker, config)
+        allkers = load_kernel_wrapper(ker, config)
     else:
         print("Using pre-loaded kernels.")
 
@@ -451,7 +456,10 @@ def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
 
     piok = {} 
     for vnams in allvars:
-        piok[vnams] = climatology(ds_ref, allkers, vnams, time_range=time_range_ref, use_climatology=True, time_chunk=time_chunk)
+        if vnams in ['rsut', 'rlut', 'rsutcs', 'rlutcs']:
+            piok[vnams] = climatology(ds_ref, allkers, vnams, time_range_clim, True, time_chunk)
+        else:
+            piok[vnams] = climatology(ds_ref, allkers, vnams, time_range_clim, use_climatology, time_chunk)
 
 
     return piok
@@ -511,7 +519,7 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climat
                 raise ValueError("filin_pi must to be a string path or an xarray.Dataset")
 
             if time_range is not None:
-                var = var.sel(time=slice(time_range['start'], time_range['end']))
+                var = var.sel(time=slice(time_range[0], time_range[1]))
 
             if use_climatology:
                 var_mean = var.groupby('time.month').mean()
@@ -535,7 +543,7 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climat
             raise ValueError("filin_pi must to be a string path or an xarray.Dataset")
 
         if time_range is not None:
-            var = var.sel(time=slice(time_range['start'], time_range['end']))
+            var = var.sel(time=slice(time_range[0], time_range[1]))
 
         if use_climatology:
             var_mean = var.groupby('time.month').mean()
@@ -753,6 +761,7 @@ def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, standard_names):
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", False)
     use_ds_climatology = bool(use_ds_climatology)
+    use_climatology = bool(use_climatology)
 
     time_range_clim = config.get("time_range", {})
     time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
@@ -831,14 +840,7 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
             anoms = var.groupby('time.month').mean() - piok.groupby('time.month').mean()
         else:
             anoms = var.groupby('time.month').mean() - piok['ts']
-    if use_climatology == False:
-        check_data(var, piok['ts'])
-        piok=piok['ts'].drop('time')
-        piok['time'] = var['time']
-        piok = piok.chunk(var.chunks)
-        anoms = var - piok
-    else:
-        anoms = var.groupby('time.month') - piok['ts']
+    
  
     for tip in ['clr', 'cld']:
         print(f"Processing {tip}")  
@@ -902,6 +904,7 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
     use_ds_climatology = bool(use_ds_climatology)
+    use_climatology = bool(use_climatology)
 
     time_range_clim = config.get("time_range", {})
     time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
@@ -1008,6 +1011,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         else:
             anoms_ok=var.groupby('time.month') - piok['ta']
             ts_anom=var_ts.groupby('time.month') - piok['ts']
+        mask=mask_atm(var)
     else: 
         if use_climatology==False:
             check_data(ds['ta'], piok['ta'])
@@ -1021,13 +1025,10 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
             anoms_ok=var.groupby('time.month').mean() - piok['ta']
             ts_anom = var_ts.groupby('time.month') - piok['ts']
             ts_anom = ts_anom.compute()
-
-    if use_ds_climatology == False:
-        mask=mask_atm(var)
-    else:
         mask=mask_atm(var)
         mask = mask.groupby('time.month').mean()
 
+    
     anoms_ok = (anoms_ok*mask).interp(plev = cose) 
 
     for tip in ['clr','cld']:
@@ -1123,6 +1124,8 @@ def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
+    use_ds_climatology = bool(use_ds_climatology)
+    use_climatology = bool(use_climatology)
 
     time_range_clim = config.get("time_range", {})
     time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
@@ -1265,7 +1268,9 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
-    use_ds_climatology = config.get("use_climatology", True) 
+    use_ds_climatology = config.get("use_climatology", True)
+    use_ds_climatology = bool(use_ds_climatology)
+    use_climatology = bool(use_climatology) 
 
     time_range_clim = config.get("time_range", {})
     time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
@@ -1367,13 +1372,14 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         piok_ta=piok['ta']
         piok_hus=piok['hus']
 
-    mask = mask.interp(lat=var.lat, lon=var.lon, method="nearest")
+    #mask = mask.interp(lat=var.lat, lon=var.lon, method="nearest")
     ta_abs_pi = piok_ta.interp(plev = cose)
     var_int = (var*mask).interp(plev = cose)
     piok_int = piok_hus.interp(plev = cose)
 
     if ker=='HUANG':
         wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file)
+        print('wid_mask calculated')
         if use_ds_climatology==False:
             if use_climatology==True:
                 anoms_ok3 = xr.apply_ufunc(lambda x, mean: np.log(x) - np.log(mean), var_int.groupby('time.month'), piok_int , dask = 'allowed')
