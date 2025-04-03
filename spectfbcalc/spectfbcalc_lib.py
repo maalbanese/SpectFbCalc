@@ -1030,7 +1030,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     for tip in ['clr','cld']:
         print(f"Processing {tip}")  
         try:
-            kernel = allkers[(tip, 'ts')]
+            kernel = allkers[(tip, 't')]
             print("Kernel loaded successfully")  
         except Exception as e:
             print(f"Error loading kernel for {tip}: {e}")  
