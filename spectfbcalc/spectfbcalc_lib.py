@@ -626,8 +626,6 @@ def mask_pres(surf_pressure, cart_out:str, allkers, config_file=None):
     - Numpy for array manipulations.
     - Custom library `ctl` for regridding datasets.
     """
-    k=allkers[('cld', 't')]
-    vlevs=pickle.load(open(cart_out + 'vlevs_HUANG.p', 'rb'))
 
     # MODIFIED TO WORK BOTH WITH ARRAY AND FILE
     k = allkers[('cld', 't')]
@@ -904,6 +902,7 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     use_ds_climatology = config.get("use_ds_climatology", True)
     use_ds_climatology = bool(use_ds_climatology)
     use_climatology = bool(use_climatology)
+    use_atm_mask=True
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -935,11 +934,11 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
 
     print("Planck-Atmosphere-LapseRate radiative anomaly computing...")
-    radiation = Rad_anomaly_planck_atm_lr(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology)
+    radiation = Rad_anomaly_planck_atm_lr(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology, use_atm_mask)
 
     return (radiation)
 
-def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=None, use_climatology=True, time_range=None, config_file=None, use_ds_climatology=True):
+def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=None, use_climatology=True, time_range=None, config_file=None, use_ds_climatology=True, use_atm_mask=True):
 
     """
     Computes the Planck atmospheric and lapse-rate radiation anomalies using climate model data and radiative kernels.
@@ -1007,7 +1006,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         else:
             anoms_ok=var.groupby('time.month') - piok['ta']
             ts_anom=var_ts.groupby('time.month') - piok['ts']
-        mask=mask_atm(var)
+        if use_atm_mask==True:
+            mask=mask_atm(var)
     else: 
         if use_climatology==False:
             check_data(ds['ta'], piok['ta'])
@@ -1024,8 +1024,10 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         mask=mask_atm(var)
         mask = mask.groupby('time.month').mean()
 
-    
-    anoms_ok = (anoms_ok*mask).interp(plev = cose) 
+    if use_atm_mask==True:
+        anoms_ok = (anoms_ok*mask).interp(plev = cose) 
+    else:
+        anoms_ok = anoms_ok.interp(plev = cose)
 
     for tip in ['clr','cld']:
         print(f"Processing {tip}")  
@@ -1057,8 +1059,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
 
         if ker=='HUANG':
             if use_ds_climatology == False:
-                dRt_unif = (anoms_unif.groupby('time.month')*kernel*wid_mask/100).sum('player').groupby('time.year').mean('time')  
-                dRt_lr = (anoms_lr.groupby('time.month')*kernel*wid_mask/100).sum('player').groupby('time.year').mean('time')   
+                dRt_unif = (anoms_unif.groupby('time.month')*kernel*wid_mask).sum('player').groupby('time.year').mean('time')  
+                dRt_lr = (anoms_lr.groupby('time.month')*kernel*wid_mask).sum('player').groupby('time.year').mean('time')   
             else:
                 dRt_unif = (anoms_unif*kernel*wid_mask/100.).sum('player').mean('month')  
                 dRt_lr = (anoms_lr*kernel*wid_mask/100.).sum('player').mean('month')  
@@ -1264,6 +1266,7 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     use_ds_climatology = config.get("use_climatology", True)
     use_ds_climatology = bool(use_ds_climatology)
     use_climatology = bool(use_climatology) 
+    use_atm_mask=True
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -1295,11 +1298,11 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
 
     print("Water-Vapour radiative anomaly computing...")
-    radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology)
+    radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology, use_atm_mask)
 
     return (radiation)
 
-def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, config_file=None, use_ds_climatology=True):
+def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, config_file=None, use_ds_climatology=True, use_atm_mask=True):
     
     """
     Computes the water vapor radiation anomaly using climate model data and radiative kernels.
@@ -1347,7 +1350,8 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         var_ta = ds['ta'].sel(time=slice(time_range['start'], time_range['end']))
     var = ctl.regrid_dataset(var, k.lat, k.lon)
     var_ta = ctl.regrid_dataset(var_ta, k.lat, k.lon)
-    mask=mask_atm(var_ta)
+    if use_atm_mask==True:
+        mask=mask_atm(var_ta)
 
     Rv = 487.5 # gas constant of water vapor
     Lv = 2.5e+06 # latent heat of water vapor
@@ -1364,7 +1368,10 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
 
     #mask = mask.interp(lat=var.lat, lon=var.lon, method="nearest")
     ta_abs_pi = piok_ta.interp(plev = cose)
-    var_int = (var*mask).interp(plev = cose)
+    if use_atm_mask==True:
+        var_int = (var*mask).interp(plev = cose)
+    else:
+        var_int = var.interp(plev = cose)
     piok_int = piok_hus.interp(plev = cose)
 
     if ker=='HUANG':
@@ -1408,9 +1415,9 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         
         if ker=='HUANG':
             if use_ds_climatology==False:
-                dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('player').groupby('time.year').mean('time')
+                dRt = (coso3.groupby('time.month')* kernel* wid_mask).sum('player').groupby('time.year').mean('time')
             else:
-                dRt = (coso3* kernel* wid_mask/100).sum('player').mean('month')
+                dRt = (coso3* kernel* wid_mask).sum('player').mean('month')
 
         if ker=='ERA5':
             if use_ds_climatology==False:
@@ -1436,8 +1443,7 @@ def calc_anoms_wrapper(config_file: str, ker, standard_names):
     print("Dataset to analyze upload...")
     ds = read_data(config_file, standard_names)
     print("Variables to consider upload...")
-    allvars = 'ts tas hus alb ta'.split()
-    #allvars1= 'rlutcs rsutcs rlut rsut'.split()
+    allvars = 'ts tas hus alb ta rlutcs rsutcs rlut rsut'.split()
     print("Read parameters from configuration file...")
 
     if isinstance(config_file, str):
@@ -1487,7 +1493,7 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatol
     """
     
     """
-    radiation=dict()
+    
     if use_climatology==True:
         cos="_climatology"
     else:
@@ -1558,6 +1564,7 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
+    use_atm_mask=True
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -1589,11 +1596,11 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
     allvars_combined = allvars + allvars1
     ref_clim_data = ref_clim(config_file, allvars_combined, ker, standard_names, allkers=allkers) 
     
-    fb_coef, fb_cloud, fb_cloud_err = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file)
+    fb_coef, fb_cloud, fb_cloud_err = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file, use_atm_mask)
 
     return fb_coef, fb_cloud, fb_cloud_err
 
-def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=True, config_file =None):
+def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=True, config_file =None, use_atm_mask=True):
     """
     Compute the radiative feedback and cloud feedback based on the provided datasets and kernels.
     
@@ -1629,19 +1636,21 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
         Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
+    
     print('planck atm')
     path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
+        Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology, use_atm_mask)
+    
     print('albedo')
     path = os.path.join(cart_out, "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
         Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
+    
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
-    
     if not os.path.exists(path):
-        Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)    
+        Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology,use_atm_mask)    
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     fb_coef = dict()
 
@@ -1660,7 +1669,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time') 
     gtas= gtas.groupby((gtas.year-1) // 10 * 10).mean()
 
-    print('calcolo feedback')
+    print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
             feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ cos+"-"+ker+"kernels.nc",  use_cftime=True)
@@ -1670,6 +1679,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
             fb_coef[(tip, fbn)] = res
     
     # #cloud
+    print('cloud feedback calculation...')
     fb_cloud, fb_cloud_err = feedback_cloud(ds, piok, fb_coef, gtas, time_range)
     
     return fb_coef, fb_cloud, fb_cloud_err
@@ -1695,6 +1705,7 @@ def feedback_cloud_wrapper(config_file: str, ker, standard_names):
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
+    use_atm_mask=True
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -1726,7 +1737,7 @@ def feedback_cloud_wrapper(config_file: str, ker, standard_names):
     allvars_combined = allvars + allvars1
     ref_clim_data = ref_clim(config_file, allvars_combined, ker, standard_names, allkers=allkers) 
 
-    fb_coef = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file)
+    fb_coef = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file, use_atm_mask)
 
     k=allkers[('cld', 't')]
     for nom in allvars1:
