@@ -900,9 +900,10 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
+    use_atm_mask = config.get("use_atm_mask", True)
     use_ds_climatology = bool(use_ds_climatology)
     use_climatology = bool(use_climatology)
-    use_atm_mask=True
+    use_atm_mask = bool(use_atm_mask)
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -1052,15 +1053,11 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
             else: 
                 anoms_lr = (anoms_ok - ts_anom.groupby('time.month').mean())
                 anoms_unif = (anoms_ok - anoms_lr)
-                print("anoms_lr:", anoms_lr.sizes) #DA CONTROLLARE!
-                print("dims:", anoms_lr.dims)
-                print("anoms_lr:", anoms_ok.sizes)
-                print("dims:", anoms_ok.dims)
 
         if ker=='HUANG':
             if use_ds_climatology == False:
-                dRt_unif = (anoms_unif.groupby('time.month')*kernel*wid_mask).sum('player').groupby('time.year').mean('time')  
-                dRt_lr = (anoms_lr.groupby('time.month')*kernel*wid_mask).sum('player').groupby('time.year').mean('time')   
+                dRt_unif = (anoms_unif.groupby('time.month')*kernel*wid_mask/100).sum('player').groupby('time.year').mean('time')  
+                dRt_lr = (anoms_lr.groupby('time.month')*kernel*wid_mask/100).sum('player').groupby('time.year').mean('time')   
             else:
                 dRt_unif = (anoms_unif*kernel*wid_mask/100.).sum('player').mean('month')  
                 dRt_lr = (anoms_lr*kernel*wid_mask/100.).sum('player').mean('month')  
@@ -1264,9 +1261,10 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_climatology", True)
+    use_atm_mask = config.get("use_atm_mask",True)
     use_ds_climatology = bool(use_ds_climatology)
     use_climatology = bool(use_climatology) 
-    use_atm_mask=True
+    use_atm_mask = bool(use_atm_mask)
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -1366,7 +1364,6 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         piok_ta=piok['ta']
         piok_hus=piok['hus']
 
-    #mask = mask.interp(lat=var.lat, lon=var.lon, method="nearest")
     ta_abs_pi = piok_ta.interp(plev = cose)
     if use_atm_mask==True:
         var_int = (var*mask).interp(plev = cose)
@@ -1415,9 +1412,9 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         
         if ker=='HUANG':
             if use_ds_climatology==False:
-                dRt = (coso3.groupby('time.month')* kernel* wid_mask).sum('player').groupby('time.year').mean('time')
+                dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('player').groupby('time.year').mean('time')
             else:
-                dRt = (coso3* kernel* wid_mask).sum('player').mean('month')
+                dRt = (coso3* kernel* wid_mask/100).sum('player').mean('month')
 
         if ker=='ERA5':
             if use_ds_climatology==False:
@@ -1455,6 +1452,10 @@ def calc_anoms_wrapper(config_file: str, ker, standard_names):
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
+    use_atm_mask = config.get("use_atm_mask", True)
+    use_climatology = bool(use_climatology)
+    use_ds_climatology = bool(use_ds_climatology)
+    use_atm_mask = bool(use_atm_mask)
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -1485,11 +1486,11 @@ def calc_anoms_wrapper(config_file: str, ker, standard_names):
     ref_clim_data_1=dict()
     ref_clim_data_1 = ref_clim(config_file, allvars, ker, standard_names, allkers) 
     anoms=dict()
-    anoms = calc_anoms(ds, ref_clim_data_1, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file)
+    anoms = calc_anoms(ds, ref_clim_data_1, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file, use_atm_mask)
 
     return (anoms)
 
-def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=False, config_file =None):
+def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=False, config_file =None, use_atm_mask=True):
     """
     
     """
@@ -1505,22 +1506,25 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatol
         anom_ps = Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
     else:
         anom_ps = xr.open_dataset(path)
+    
     print('planck atm')
     path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        anom_pal = Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
+        anom_pal = Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology, use_atm_mask)
     else:
         anom_pal = xr.open_dataset(path)
+    
     print('albedo')
     path = os.path.join(cart_out, "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
         anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
     else:
         anom_a = xr.open_dataset(path)
+    
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
-        anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology)
+        anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology, use_atm_mask)
     else:
         anom_wv = xr.open_dataset(path)  
 
