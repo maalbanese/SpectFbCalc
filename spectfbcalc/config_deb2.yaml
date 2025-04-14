@@ -1,0 +1,28 @@
+kernels:
+  era5:
+    path_input: "/data-hobbes/fabiano/radiative_kernels/Huang_ERA5/"
+    path_output: "/home/rotoli/codici/test_nuovamaskpress/"
+    filename_template: "ERA5_kernel_{}_TOA.nc"
+  huang:
+    path_input: "/data-hobbes/fabiano/radiative_kernels/Huang/toa/"
+    path_output: "/home/rotoli/codici/test_nuovamaskpress/"
+    filename_template: "RRTMG_{}_toa_{}_highR.nc"
+
+file_paths:
+   reference_dataset: "/home/rotoli/codici/data_pi_hus/*.nc"
+   reference_dataset_pl: 
+   experiment_dataset: "/home/rotoli/codici/data_hus/*.nc"
+   experiment_dataset2: #"/nas/archive_CMIP6/CMIP6/model-output/EC-Earth-Consortium/EC-Earth3/abrupt-4xCO2/atmos/Amon/r8i1p1f1/{}/*.nc" #if you need a second dataset, specify it here 
+   experiment_dataset_pl: 
+   pressure_data: "/data-hobbes/fabiano/radiative_kernels/ps_ece3/ps_Amon_EC-Earth3_stabilization-hist-1990_r1i1p1f1_gr_199?01-199?12.nc" #to specify if you have ps values in a different file and not in an array
+   output: "/home/rotoli/codici/test_nuovamaskpress/"
+
+use_climatology: True
+use_ds_climatology: False
+time_range:
+  start: #'2540-01-01' 
+  end: #'2689-12-31'
+time_range_exp:
+  start: #'1850-01-01'
+  end: #'1999-12-31'
+time_chunk: 12
