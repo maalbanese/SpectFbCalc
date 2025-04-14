@@ -10,6 +10,7 @@ import os
 import glob
 import re
 
+import dask.delayed
 import numpy as np
 import xarray as xr
 import pandas as pd
@@ -23,6 +24,9 @@ import dask.array as da
 import yaml
 from difflib import get_close_matches
 import dask
+import psutil
+
+
 
 ######################################################################
 ### Functions
@@ -855,7 +859,7 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
         planck = dRt_glob.compute() 
         radiation[(tip, 'planck-surf')] = planck
         planck.to_netcdf(cart_out + "dRt_planck-surf_global_" + tip + cos + "-" + ker + "kernels.nc", format="NETCDF4")
-
+        planck.close()
     return(radiation)
 
 #PLANK-ATMO AND LAPSE RATE WITH VARYING TROPOPAUSE
@@ -973,7 +977,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     cose=pickle.load(open(cart_out + 'cose_'+ker+'.p', 'rb'))
 
     if ker=='HUANG':
-        wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file)
+        vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
+        wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file) 
 
     if ker=='ERA5':
         vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
@@ -1029,6 +1034,25 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     else:
         anoms_ok = anoms_ok.interp(plev = cose)
 
+    if ker=='HUANG':
+        if use_ds_climatology == False:
+                anoms_lr = (anoms_ok - ts_anom)  
+                anoms_unif = (anoms_ok - anoms_lr)
+        else: 
+                anoms_lr = (anoms_ok - ts_anom.mean('time'))
+                anoms_unif = (anoms_ok - anoms_lr)
+    if ker=='ERA5':
+        if use_ds_climatology == False:
+                anoms_lr = (anoms_ok - ts_anom)  
+                anoms_unif = (anoms_ok - anoms_lr)
+        else: 
+                anoms_lr = (anoms_ok - ts_anom.groupby('time.month').mean())
+                anoms_unif = (anoms_ok - anoms_lr)
+                print("anoms_lr:", anoms_lr.sizes) #DA CONTROLLARE!
+                print("dims:", anoms_lr.dims)
+                print("anoms_lr:", anoms_ok.sizes)
+                print("dims:", anoms_ok.dims)
+
     for tip in ['clr','cld']:
         print(f"Processing {tip}")  
         try:
@@ -1040,27 +1064,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
 
         if ker=='HUANG':
             if use_ds_climatology == False:
-                anoms_lr = (anoms_ok - ts_anom)  
-                anoms_unif = (anoms_ok - anoms_lr)
-            else: 
-                anoms_lr = (anoms_ok - ts_anom.mean('time'))
-                anoms_unif = (anoms_ok - anoms_lr)
-        if ker=='ERA5':
-            if use_ds_climatology == False:
-                anoms_lr = (anoms_ok - ts_anom)  
-                anoms_unif = (anoms_ok - anoms_lr)
-            else: 
-                anoms_lr = (anoms_ok - ts_anom.groupby('time.month').mean())
-                anoms_unif = (anoms_ok - anoms_lr)
-                print("anoms_lr:", anoms_lr.sizes) #DA CONTROLLARE!
-                print("dims:", anoms_lr.dims)
-                print("anoms_lr:", anoms_ok.sizes)
-                print("dims:", anoms_ok.dims)
-
-        if ker=='HUANG':
-            if use_ds_climatology == False:
-                dRt_unif = (anoms_unif.groupby('time.month')*kernel*wid_mask).sum('player').groupby('time.year').mean('time')  
-                dRt_lr = (anoms_lr.groupby('time.month')*kernel*wid_mask).sum('player').groupby('time.year').mean('time')   
+                dRt_unif = (anoms_unif.groupby('time.month')*kernel*wid_mask/100).sum('player').groupby('time.year').mean('time')  
+                dRt_lr = (anoms_lr.groupby('time.month')*kernel*wid_mask/100).sum('player').groupby('time.year').mean('time')   
             else:
                 dRt_unif = (anoms_unif*kernel*wid_mask/100.).sum('player').mean('month')  
                 dRt_lr = (anoms_lr*kernel*wid_mask/100.).sum('player').mean('month')  
@@ -1081,7 +1086,9 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         radiation[(tip,'lapse-rate')]=feedbacks_lr 
         feedbacks_atmo.to_netcdf(cart_out+ "dRt_planck-atmo_global_" +tip +cos+"-"+ker+"kernels.nc", format="NETCDF4")
         feedbacks_lr.to_netcdf(cart_out+ "dRt_lapse-rate_global_" +tip  +cos+"-"+ker+"kernels.nc", format="NETCDF4")
-        
+        feedbacks_lr.close()
+        feedbacks_atmo.close()
+
     return(radiation)
 
 #ALBEDO
@@ -1219,7 +1226,8 @@ def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, use_climatology=True, t
         alb = 100*dRt_glob
         radiation[(tip, 'albedo')]= alb
         alb.to_netcdf(cart_out+ "dRt_albedo_global_" +tip +cos+"-"+ker+"kernels.nc", format="NETCDF4")
-        
+        alb.close()
+
     return(radiation)
 
 #W-V COMPUTATION
@@ -1263,8 +1271,10 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
-    use_ds_climatology = config.get("use_climatology", True)
+    use_ds_climatology = config.get("use_ds_climatology", True)
     use_ds_climatology = bool(use_ds_climatology)
+    print('ds_climatology: ')
+    print(use_ds_climatology)
     use_climatology = bool(use_climatology) 
     use_atm_mask=True
 
@@ -1375,12 +1385,16 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
     piok_int = piok_hus.interp(plev = cose)
 
     if ker=='HUANG':
+        vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
         wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file)
-        print('wid_mask calculated')
+        print(wid_mask)
+        
         if use_ds_climatology==False:
             if use_climatology==True:
                 anoms_ok3 = xr.apply_ufunc(lambda x, mean: np.log(x) - np.log(mean), var_int.groupby('time.month'), piok_int , dask = 'allowed')
                 coso3= anoms_ok3.groupby('time.month') *dlnws(ta_abs_pi)
+                process = psutil.Process(os.getpid())
+                print('total RAM memory used (anoms and coso):', process.memory_info().rss/1e9)
             else:
                 anoms_ok3 = xr.apply_ufunc(lambda x, mean: np.log(x) - np.log(mean), var_int, piok_int , dask = 'allowed')
                 coso3= anoms_ok3*dlnws(ta_abs_pi)
@@ -1415,9 +1429,11 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         
         if ker=='HUANG':
             if use_ds_climatology==False:
-                dRt = (coso3.groupby('time.month')* kernel* wid_mask).sum('player').groupby('time.year').mean('time')
+                dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('player').groupby('time.year').mean('time')
+                process = psutil.Process(os.getpid())
+                print('total RAM memory used by dRt:', process.memory_info().rss/1e9)
             else:
-                dRt = (coso3* kernel* wid_mask).sum('player').mean('month')
+                dRt = (coso3* kernel* wid_mask/100).sum('player').mean('month')
 
         if ker=='ERA5':
             if use_ds_climatology==False:
@@ -1427,9 +1443,12 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
 
 
         dRt_glob = ctl.global_mean(dRt)
+        process = psutil.Process(os.getpid())
+        print('total RAM memory used for global mean (no compute):', process.memory_info().rss/1e9)
         wv= dRt_glob.compute()
         radiation[(tip, 'water-vapor')]=wv
         wv.to_netcdf(cart_out+ "dRt_water-vapor_global_" +tip+cos +"-"+ker+"kernels.nc", format="NETCDF4")
+        wv.close()
         
     return radiation
 
@@ -1484,10 +1503,10 @@ def calc_anoms_wrapper(config_file: str, ker, standard_names):
     print("Upload reference climatology for Rad anomaly...")
     ref_clim_data_1=dict()
     ref_clim_data_1 = ref_clim(config_file, allvars, ker, standard_names, allkers) 
-    anoms=dict()
-    anoms = calc_anoms(ds, ref_clim_data_1, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file)
+    
+    anom_ps, anom_pal, anom_a, anom_wv = calc_anoms(ds, ref_clim_data_1, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file)
 
-    return (anoms)
+    return (anom_ps, anom_pal, anom_a, anom_wv)
 
 def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=False, config_file =None):
     """
