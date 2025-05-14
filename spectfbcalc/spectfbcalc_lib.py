@@ -1268,7 +1268,7 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
-    use_ds_climatology = config.get("use_climatology", True)
+    use_ds_climatology = config.get("use_ds_climatology", True)
     use_atm_mask = config.get("use_atm_mask",True)
     use_ds_climatology = bool(use_ds_climatology)
     print('ds_climatology: ')
@@ -1677,7 +1677,11 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
 
     #compute gtas
     k=allkers[('cld', 't')]
-    var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon) 
+    if time_range is not None:
+        var_tas = ds['tas'].sel(time=slice(time_range['start'], time_range['end'])) 
+        var_tas= ctl.regrid_dataset(var_tas, k.lat, k.lon)  
+    else:
+        var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon) 
 
     if use_climatology == False:
         piok_tas=piok['tas'].drop('time')
