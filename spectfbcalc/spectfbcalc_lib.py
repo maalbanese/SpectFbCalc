@@ -225,25 +225,8 @@ def load_kernel(ker, cart_k, cart_out, finam):
     return allkers
 
 ###### LOAD AND CHECK DATA
-standard_names = {
-    "rsus": "surface upwelling shortwave radiation",
-    "rsds": "surface downwelling shortwave radiation",
-    "time": "time dimension",
-    "lat": "latitude",
-    "lon": "longitude",
-    "plev": "pressure levels",
-    "ps": "surface pressure",
-    "ts": "surface temperature",
-    "tas": "near-surface air temperature",
-    "ta": "atmospheric temperature",
-    "hus": "specific humidity",
-    "rlut":"outgoing longwave radiation",
-    "rsut":"reflected shortwave radiation",
-    "rlutcs":"clear-sky outgoing longwave radiation",
-    "rsutcs":"clear-sky outgoing shortwave radiation"
-}
 
-def read_data(config_file: str, standard_names):
+def read_data(config_file: str, variable_mapping_file: str = "configvariable.yml") -> xr.Dataset:
     """
     Reads the configuration from the YAML file, opens the NetCDF file specified in the config,
     and standardizes the variable names in the dataset.
@@ -253,8 +236,8 @@ def read_data(config_file: str, standard_names):
     config_file : str
         The path to the YAML configuration file.
     
-    standard_names : dict
-        A dictionary containing the standard names for variables.
+    variable_mapping_file : str
+        Path to the YAML file that contains renaming and computation rules.
     
     Returns:
     --------
@@ -272,12 +255,14 @@ def read_data(config_file: str, standard_names):
     file_path2 = config['file_paths'].get('experiment_dataset2', None)
     file_pathpl = config['file_paths'].get('experiment_dataset_pl', None)
     time_chunk = config.get('time_chunk', None)
+    dataset_type = config.get('dataset_type', None)
+
 
     if not file_path1:
         raise ValueError("Error: The 'experiment_dataset' path is not specified in the configuration file")
 
     
-    ds_list = [xr.open_mfdataset(file_path1,  use_cftime=True, chunks={'time': time_chunk})]
+    ds_list = [xr.open_mfdataset(file_path1, combine='by_coords', use_cftime=True, chunks={'time': time_chunk})]
  
     if file_path2 and file_path2.strip():
         ds_list.append(xr.open_mfdataset(file_path2, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
@@ -288,106 +273,65 @@ def read_data(config_file: str, standard_names):
     # Merge dataset
     ds = xr.merge(ds_list, compat="override")
 
-    required_vars = list(standard_names.keys())
-    missing_vars = [var for var in required_vars if var not in ds.variables]
-
-    if missing_vars:
-        print(f"Warning: The following required variables are not present in the dataset: {missing_vars}")
-        print("Check that the files in config have the necessary variables.")
-
-    ds = standardize_names(ds, standard_names)
+    ds = standardize_names(ds, dataset_type, variable_mapping_file)
 
     return ds
 
-def standardize_names(ds, standard_names):
+def load_variable_mapping(configvar_file, dataset_type):
+    """Load variable mappings for the specified dataset type from YAML."""
+    with open(configvar_file, 'r') as file:
+        config = yaml.safe_load(file)
+    return config.get(dataset_type, {})
+
+def safe_eval(expr, ds):
+    """Safely evaluate a string expression using variables from the xarray dataset."""
+    local_dict = {var: ds[var] for var in ds.variables}
+    try:
+        return eval(expr, {"__builtins__": {}}, local_dict)
+    except Exception as e:
+        print(f"Failed to evaluate expression '{expr}': {e}")
+        return None
+
+def standardize_names(ds, dataset_type="ece3", configvar_file="configvariable.yml"):
     """
-    Standardizes variable names in a dataset by checking against a dictionary of standard names.
-    
-    If a variable is not recognized, the function suggests a possible match based on similarity,
-    and asks the user if they want to rename it.
-    
-    Parameters:
-    -----------
+    Standardizes and computes variable names in the dataset using a config file.
+
+    Parameters
+    ----------
     ds : xarray.Dataset
-        The dataset containing the variables to be checked.
-    
-    standard_names : dict
-        A dictionary with standard variable names.
-    
-    Returns:
-    --------
-    ds : xarray.Dataset
-        The dataset with standardized variable names.
+        The dataset to be standardized.
+    dataset_type : str
+        Either 'ece3', 'ece4', etc. depending on the mapping config.
+    config_file : str
+        Path to the YAML file with variable mappings.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset with renamed and computed variables.
     """
-    print("Standard variable names:", list(standard_names.keys()))
+    mapping = load_variable_mapping(configvar_file, dataset_type)
+    rename_map = mapping.get("rename_map", {})
+    compute_map = mapping.get("compute_map", {})
 
-    renamed_vars = {}  
-    unrecognized_vars = []  
+    # Apply renaming
+    existing_renames = {old: new for old, new in rename_map.items() if old in ds.variables}
+    ds = ds.rename(existing_renames)
+    if existing_renames:
+        print(f"Renamed variables: {existing_renames}")
+    else:
+        print("No variables needed to be renamed.")
 
-    for var_name in list(ds.variables):  
-        # Skip already standard variables
-        if var_name in standard_names:
-            continue 
-        
-        # Suggest a renaming based on close matches
-        close_match = get_close_matches(var_name, standard_names.keys(), n=1, cutoff=0.9)
-        
-        if close_match:
-            suggested_name = close_match[0]
-            response = input(f"Variable '{var_name}' not recognized. Do you want to rename it to '{suggested_name}'? (y/n): ")
-            if response.lower() == 'y':
-                renamed_vars[var_name] = suggested_name
+     # Apply computed variables
+    for new_var, expr in compute_map.items():
+        if new_var not in ds:
+            result = safe_eval(expr, ds)
+            if result is not None:
+                ds[new_var] = result
+                print(f"Computed variable '{new_var}' using expression: {expr}")
             else:
-                unrecognized_vars.append(var_name)
-        else:
-            # If no close match is found, let the user decide
-            response = input(f"Variable '{var_name}' not recognized and no close match found. Do you want to rename it manually? (y/n): ")
-            if response.lower() == 'y':
-                new_name = input(f"Please enter the new name for the variable '{var_name}': ")
-                renamed_vars[var_name] = new_name
-            else:
-                unrecognized_vars.append(var_name)
-    
-    # Rename variables in the dataset
-    if renamed_vars:
-        ds = ds.rename(renamed_vars)
-        print(f"Variables automatically renamed: {renamed_vars}")
+                print(f"Failed to compute variable '{new_var}'")
 
-    # Print out any unrecognized variables
-    if unrecognized_vars:
-        print(f"Not recognized variables that were not renamed: {unrecognized_vars}")
-
-    print("Variables in dataset after renaming:", list(ds.variables))
-
-    # Check for missing variables and suggest calculating them
-    all_vars = set(ds.variables) | set(unrecognized_vars)
-    # New conditions for calculating missing variables
-    if 'rsutcs' not in ds.variables and 'rsdt' in all_vars and 'rsntcs' in all_vars:
-        response = input("Missing 'rsutcs'. You can calculate it as 'rsutcs = rsdt - rsntcs'. Do you want to do that? (y/n): ")
-        if response.lower() == 'y':
-            ds['rsutcs'] = ds['rsdt'] - ds['rsntcs']
-    
-    if 'rlutcs' not in ds.variables and 'rlntcs' in ds.variables:
-        response = input("Missing 'rlutcs'. You can calculate it as 'rlutcs = -rlntcs'. Do you want to do that? (y/n): ")
-        if response.lower() == 'y':
-            ds['rlutcs'] = -ds['rlntcs']
-
-    if 'rsus' not in ds.variables and 'ssr' in all_vars and 'rsds' in all_vars:
-        response = input("Missing 'rsus'. You can calculate it as 'rsus = rsds - ssr'. Do you want to do that? (y/n): ")
-        if response.lower() == 'y':
-            ds['rsus'] = ds['rsds'] - ds['ssr']
-    
-    if 'rsutcs' not in ds.variables and 'rsut' in all_vars and 'tsrc' in all_vars and 'tsr' in all_vars:
-        response = input("Missing 'rsutcs'. You can calculate it as 'rsutcs = rsut x (tsrc/tsr)'. Do you want to do that? (y/n): ")
-        if response.lower() == 'y':
-            ds['rsutcs'] = ds['rsut'] * (ds['tsrc']/ds['tsr'])
-    
-    # Handle tas/ts equivalence
-    if 'ts' not in ds.variables and 'tas' in all_vars:
-        response = input("Missing 'ts'. You can use 'tas' as 'ts'. Do you want to do that? (y/n): ")
-        if response.lower() == 'y':
-            ds['ts'] = ds['tas']
-    
     return ds
 
 def check_data(ds, piok):
@@ -397,7 +341,7 @@ def check_data(ds, piok):
 
 ######################################################################################
 #### Aux functions
-def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
+def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers=None):
     """
     Computes the reference climatology using the provided configuration, variables, and kernel data.
 
@@ -409,8 +353,8 @@ def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
         The variable to process (e.g., 'alb', 'rsus').
     ker : dict
         The preprocessed kernels.
-    standard_names : dict
-        A dictionary containing the standard names for variables.
+    variable_mapping_file : str
+        Path to the YAML file that contains renaming and computation rules.
 
     Returns:
     --------
@@ -424,6 +368,7 @@ def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
     else:
         config = config_file 
 
+    dataset_type = config.get('dataset_type', None)
     filin_pi = config['file_paths'].get('reference_dataset', None)
     filin_pi_pl = config['file_paths'].get('reference_dataset_pl', None)
     time_chunk = config.get('time_chunk', None)
@@ -433,24 +378,17 @@ def ref_clim(config_file: str, allvars, ker, standard_names, allkers=None):
     if not filin_pi:
         raise ValueError("Error: the 'reference_dataset' path is not specified in the configuration file.")
 
-    ds_list = [xr.open_mfdataset(filin_pi, use_cftime=True, chunks={'time': time_chunk})]
+    ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', compat='no_conflicts', use_cftime=True, chunks={'time': time_chunk})]
     
     if filin_pi_pl and filin_pi_pl.strip():
         ds_list.append(xr.open_mfdataset(filin_pi_pl, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
 
     ds_ref = xr.merge(ds_list, compat="override")
 
-    required_vars = list(standard_names.keys())
-    missing_vars = [var for var in required_vars if var not in ds_ref.variables]
-    if missing_vars:
-        print(f"Warning: the following required variables are missing in the dataset: {missing_vars}")
-        print("Check that specified files in config have the necessary variables.")
-    
-    ds_ref = standardize_names(ds_ref, standard_names)
+    ds_ref = standardize_names(ds_ref, dataset_type, variable_mapping_file)
 
     time_range_clim = config.get("time_range", {})
-    time_range_clim = (time_range_clim.get("start"), time_range_clim.get("end"))
-    time_range_clim = time_range_clim if all(time_range_clim) else None
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
 
     if allkers is None:  
         allkers = load_kernel_wrapper(ker, config)
@@ -525,7 +463,7 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, use_climat
                 raise ValueError("filin_pi must to be a string path or an xarray.Dataset")
 
             if time_range is not None:
-                var = var.sel(time=slice(time_range[0], time_range[1]))
+                var = var.sel(time=slice(time_range['start'], time_range['end']))
 
             if use_climatology:
                 var_mean = var.groupby('time.month').mean()
@@ -724,7 +662,7 @@ def dlnws(T):
     return dws
 
 #PLANCK SURFACE
-def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, standard_names):
+def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
     Wrapper for Rad_anomaly_planck_surf function, which upload automatically the dataset,
     kernels and climatology are necessary to calculate the radiative Planck-Surface anomaly.
@@ -735,8 +673,8 @@ def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, standard_names):
         configuration file YAML.
     ker : str
         kernels to upload ('ERA5' o 'HUANG').
-    standard_names : dict
-        standardized variables dictionary.
+    variable_mapping_file : str
+        Path to the YAML file with variable standardization rules.
 
     Returns:
     --------
@@ -744,22 +682,21 @@ def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, standard_names):
         radiative anomalies dictionary for clear sky ('clr') and all ('cld').
     """
 
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, standard_names)
-    print("Variables to consider upload...")
-    allvars = 'ts'
-    print("Read parameters from configuration file...")
-
-    if allvars not in ds.variables:
-        raise ValueError("The ts variable is not in the dataset")
-
     if isinstance(config_file, str):
         with open(config_file, 'r') as file:
             config = yaml.safe_load(file)
     else:
         config = config_file 
+
+    print("Kernel upload...")
+    allkers = load_kernel_wrapper(ker, config_file)
+    print("Dataset to analyze upload...")
+    ds = read_data(config_file, variable_mapping_file)
+    print("Variables to consider upload...")
+    allvars = 'ts'
+    print("Read parameters from configuration file...")
+    if allvars not in ds.variables:
+        raise ValueError("The ts variable is not in the dataset")
     
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
@@ -778,7 +715,7 @@ def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, standard_names):
     print(f"Time range used for the simulation analysis: {time_range_to_use}")
 
     print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
 
     print("Planck-Surface radiative anomaly computing...")
     radiation = Rad_anomaly_planck_surf(ds, ref_clim_data, ker, allkers, cart_out, use_climatology, time_range_to_use, use_ds_climatology)
@@ -811,7 +748,6 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
       Here, `{suffix}` = `"_climatology-{ker}kernels"` or `"_21yearmean-{ker}kernels"`, based on the 
       `use_climatology` flag and kernel type (`ker`).   
     """
-
     radiation = dict()
     k = allkers[('cld', 't')]
     cos = "_climatology" if use_climatology else "_21yearmean"
@@ -863,7 +799,7 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
     return(radiation)
 
 #PLANK-ATMO AND LAPSE RATE WITH VARYING TROPOPAUSE
-def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
+def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
     Wrapper for Rad_anomaly_planck_atm_lr function, which upload automatically the dataset,
     kernels and climatology are necessary to calculate the radiative Planck-Atmosphere-LpseRate anomaly.
@@ -874,8 +810,9 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
         configuration file YAML.
     ker : str
         kernels to upload ('ERA5' o 'HUANG').
-    standard_names : dict
-        standardized variables dictionary.
+    variable_mapping_file : str
+        Path to the YAML file with variable standardization rules.
+
 
     Returns:
     --------
@@ -883,10 +820,16 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
         radiative anomalies dictionary for clear sky ('clr') and all ('cld').
     """
 
+    if isinstance(config_file, str):
+        with open(config_file, 'r') as file:
+            config = yaml.safe_load(file)
+    else:
+        config = config_file 
+
     print("Kernel upload...")
     allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
-    ds = read_data(config_file, standard_names)
+    ds = read_data(config_file, variable_mapping_file)
     print("Variables to consider upload...")
     allvars = 'ts ta'.split()
     print("Read parameters from configuration file...")
@@ -894,13 +837,8 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     for var in allvars:
         if var not in ds.variables:
             raise ValueError(f"The variable '{var}' is not in the dataset")
-
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
     
+    dataset_type = config.get('dataset_type', None)
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
@@ -931,12 +869,12 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
                 raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
             
             surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, standard_names)
+            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
         else:
             print("Using surface pressure passed as an array.")
 
     print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config, allvars, ker, variable_mapping_file, allkers=allkers) 
 
     print("Planck-Atmosphere-LapseRate radiative anomaly computing...")
     radiation = Rad_anomaly_planck_atm_lr(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology, use_atm_mask)
@@ -1089,7 +1027,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     return(radiation)
 
 #ALBEDO
-def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
+def Rad_anomaly_albedo_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
     Wrapper for Rad_anomaly_albedo function, which upload automatically the dataset,
     kernels and climatology are necessary to calculate the radiative Albedo anomaly.
@@ -1100,8 +1038,8 @@ def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
         configuration file YAML.
     ker : str
         kernels to upload ('ERA5' o 'HUANG').
-    standard_names : dict
-        standardized variables dictionary.
+    variable_mapping_file : str
+        Path to the YAML file with variable standardization rules.
 
     Returns:
     --------
@@ -1109,19 +1047,19 @@ def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
         radiative anomalies dictionary for clear sky ('clr') and all ('cld').
     """
 
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, standard_names)
-    print("Variables to consider upload...")
-    allvars = 'alb'
-    print("Read parameters from configuration file...")
-
     if isinstance(config_file, str):
         with open(config_file, 'r') as file:
             config = yaml.safe_load(file)
     else:
         config = config_file 
+
+    print("Kernel upload...")
+    allkers = load_kernel_wrapper(ker, config_file)
+    print("Dataset to analyze upload...")
+    ds = read_data(config_file, variable_mapping_file)
+    print("Variables to consider upload...")
+    allvars = 'alb'
+    print("Read parameters from configuration file...")
     
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
@@ -1140,7 +1078,7 @@ def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
     print(f"Time range used for the simulation analysis: {time_range_to_use}")
 
     print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config, allvars, ker, variable_mapping_file, allkers=allkers) 
 
     print("Albedo radiative anomaly computing...")
     radiation = Rad_anomaly_albedo(ds, ref_clim_data, ker, allkers, cart_out, use_climatology, time_range_to_use, use_ds_climatology)
@@ -1228,7 +1166,7 @@ def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, use_climatology=True, t
     return(radiation)
 
 #W-V COMPUTATION
-def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
+def Rad_anomaly_wv_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
     Wrapper for Rad_anomaly_wv function, which upload automatically the dataset,
     kernels and climatology are necessary to calculate the radiative Water-Vapour anomaly.
@@ -1239,8 +1177,8 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
         configuration file YAML.
     ker : str
         kernels to upload ('ERA5' o 'HUANG').
-    standard_names : dict
-        standardized variables dictionary.
+    variable_mapping_file : str
+        Path to the YAML file with standardization rules for variables.
 
     Returns:
     --------
@@ -1251,7 +1189,7 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     print("Kernel upload...")
     allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
-    ds = read_data(config_file, standard_names)
+    ds = read_data(config_file, variable_mapping_file)
     print("Variables to consider upload...")
     allvars = 'hus ta'.split()
     print("Read parameters from configuration file...")
@@ -1266,13 +1204,12 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     else:
         config = config_file 
     
+    dataset_type = config.get('dataset_type', None)
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
     use_atm_mask = config.get("use_atm_mask",True)
     use_ds_climatology = bool(use_ds_climatology)
-    print('ds_climatology: ')
-    print(use_ds_climatology)
     use_climatology = bool(use_climatology) 
     use_atm_mask = bool(use_atm_mask)
 
@@ -1298,12 +1235,12 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
                 raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
             
             surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, standard_names)
+            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
         else:
             print("Using surface pressure passed as an array.")
 
     print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config, allvars, ker, variable_mapping_file, allkers=allkers) 
 
     print("Water-Vapour radiative anomaly computing...")
     radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology, use_atm_mask)
@@ -1384,14 +1321,11 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
     if ker=='HUANG':
         vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
         wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file)
-        print(wid_mask)
         
         if use_ds_climatology==False:
             if use_climatology==True:
                 anoms_ok3 = xr.apply_ufunc(lambda x, mean: np.log(x) - np.log(mean), var_int.groupby('time.month'), piok_int , dask = 'allowed')
                 coso3= anoms_ok3.groupby('time.month') *dlnws(ta_abs_pi)
-                process = psutil.Process(os.getpid())
-                print('total RAM memory used (anoms and coso):', process.memory_info().rss/1e9)
             else:
                 anoms_ok3 = xr.apply_ufunc(lambda x, mean: np.log(x) - np.log(mean), var_int, piok_int , dask = 'allowed')
                 coso3= anoms_ok3*dlnws(ta_abs_pi)
@@ -1438,8 +1372,6 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
 
 
         dRt_glob = ctl.global_mean(dRt)
-        process = psutil.Process(os.getpid())
-        print('total RAM memory used for global mean (no compute):', process.memory_info().rss/1e9)
         wv= dRt_glob.compute()
         radiation[(tip, 'water-vapor')]=wv
         wv.to_netcdf(cart_out+ "dRt_water-vapor_global_" +tip+cos +"-"+ker+"kernels.nc", format="NETCDF4")
@@ -1448,24 +1380,28 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
     return radiation
 
 #ALL RAD_ANOM COMPUTATION
-def calc_anoms_wrapper(config_file: str, ker, standard_names):
+def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
    
     """
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, standard_names)
-    print("Variables to consider upload...")
-    allvars = 'ts tas hus alb ta rlutcs rsutcs rlut rsut'.split()
-    print("Read parameters from configuration file...")
-
     if isinstance(config_file, str):
         with open(config_file, 'r') as file:
             config = yaml.safe_load(file)
     else:
-        config = config_file 
+        config = config_file
     
+    print("Kernel upload...")
+    allkers = load_kernel_wrapper(ker, config_file)
+    print("Dataset to analyze upload...")
+    ds = read_data(config_file, variable_mapping_file)
+    print("Variables to consider upload...")
+    allvars = 'ts tas hus alb ta'.split()
+    allvars_c = 'rlutcs rsutcs rlut rsut'.split()
+    if all(var in ds.variables for var in allvars_c):
+        allvars = allvars + allvars_c  # extend the list
+    print("Read parameters from configuration file...")
+    
+    dataset_type = config.get('dataset_type', None)
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
@@ -1495,15 +1431,14 @@ def calc_anoms_wrapper(config_file: str, ker, standard_names):
                 raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
             
             surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, standard_names)
+            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
         else:
             print("Using surface pressure passed as an array.")
 
     print("Upload reference climatology for Rad anomaly...")
-    ref_clim_data_1=dict()
-    ref_clim_data_1 = ref_clim(config_file, allvars, ker, standard_names, allkers) 
+    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers) 
     
-    anom_ps, anom_pal, anom_a, anom_wv = calc_anoms(ds, ref_clim_data_1, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file)
+    anom_ps, anom_pal, anom_a, anom_wv = calc_anoms(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file, use_atm_mask)
 
     return (anom_ps, anom_pal, anom_a, anom_wv)
 
@@ -1548,7 +1483,7 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, use_climatol
     return anom_ps, anom_pal, anom_a, anom_wv 
 
 ##FEEDBACK COMPUTATION
-def calc_fb_wrapper(config_file: str, ker, standard_names):
+def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
     Wrapper function to compute radiative and cloud feedbacks based on the provided configuration file and kernel type.
     
@@ -1559,7 +1494,8 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
     Parameters:
     - config_file (str): Path to the configuration YAML file containing the model settings and file paths.
     - ker (str): Kernel type (e.g., 'HUANG') that determines if surface pressure is required for the analysis.
-    - standard_names (dict): Dictionary of standardized variable names to be used in the dataset.
+    -  variable_mapping_file : str
+        Path to the YAML file with standardization rules for variables.
     
     Returns:
     - fb_coef (dict): Dictionary containing feedback coefficients for radiative anomalies.
@@ -1567,25 +1503,31 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
     - fb_cloud_err (xarray.DataArray): Cloud feedback error data array.
    
     """
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, standard_names)
-    print("Variables to consider upload...")
-    allvars = 'ts tas hus alb ta'.split()
-    allvars1= 'rlutcs rsutcs rlut rsut'.split()
-    print("Read parameters from configuration file...")
-
     if isinstance(config_file, str):
         with open(config_file, 'r') as file:
             config = yaml.safe_load(file)
     else:
         config = config_file 
     
+    print("Kernel upload...")
+    allkers = load_kernel_wrapper(ker, config_file)
+    print("Dataset to analyze upload...")
+    ds = read_data(config_file, variable_mapping_file)
+    print("Variables to consider upload...")
+    allvars = 'ts tas hus alb ta'.split()
+    allvars_c = 'rlutcs rsutcs rlut rsut'.split()
+    if all(var in ds.variables for var in allvars_c):
+        allvars = allvars + allvars_c  
+    print("Read parameters from configuration file...")
+    
+    dataset_type = config.get('dataset_type', None)
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
-    use_atm_mask=True
+    use_atm_mask=config.get("use_atm_mask", True)
+    use_climatology = bool(use_climatology)
+    use_ds_climatology = bool(use_ds_climatology)
+    use_atm_mask = bool(use_atm_mask)
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -1609,13 +1551,12 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
                 raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
             
             surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, standard_names)
+            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
         else:
             print("Using surface pressure passed as an array.")
 
     print("Upload reference climatology...")
-    allvars_combined = allvars + allvars1
-    ref_clim_data = ref_clim(config_file, allvars_combined, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
     
     fb_coef, fb_cloud, fb_cloud_err = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file, use_atm_mask)
 
@@ -1710,16 +1651,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
     return fb_coef, fb_cloud, fb_cloud_err
 
 #CLOUD FEEDBACK shell 2008
-def feedback_cloud_wrapper(config_file: str, ker, standard_names):
-
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, standard_names)
-    print("Variables to consider upload...")
-    allvars = 'tas'
-    allvars1= 'rlutcs rsutcs rlut rsut'.split()
-    print("Read parameters from configuration file...")
+def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
 
     if isinstance(config_file, str):
         with open(config_file, 'r') as file:
@@ -1727,10 +1659,23 @@ def feedback_cloud_wrapper(config_file: str, ker, standard_names):
     else:
         config = config_file 
     
+    print("Kernel upload...")
+    allkers = load_kernel_wrapper(ker, config_file)
+    print("Dataset to analyze upload...")
+    ds = read_data(config_file, variable_mapping_file)
+    print("Variables to consider upload...")
+    allvars = 'tas'
+    allvars1= 'rlutcs rsutcs rlut rsut'.split()
+    print("Read parameters from configuration file...")
+    
+    dataset_type = config.get('dataset_type', None)
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
     use_ds_climatology = config.get("use_ds_climatology", True)
-    use_atm_mask=True
+    use_atm_mask = config.get("use_atm_mask", True)
+    use_climatology = bool(use_climatology)
+    use_ds_climatology = bool(use_ds_climatology)
+    use_atm_mask = bool(use_atm_mask)
 
     time_range_clim = config.get("time_range", {})
     time_range_exp = config.get("time_range_exp", {})
@@ -1754,13 +1699,13 @@ def feedback_cloud_wrapper(config_file: str, ker, standard_names):
                 raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
             
             surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, standard_names)
+            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
         else:
             print("Using surface pressure passed as an array.")
 
     print("Upload reference climatology...")
     allvars_combined = allvars + allvars1
-    ref_clim_data = ref_clim(config_file, allvars_combined, ker, standard_names, allkers=allkers) 
+    ref_clim_data = ref_clim(config_file, allvars_combined, ker, variable_mapping_file, allkers=allkers) 
 
     fb_coef = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file, use_atm_mask)
 
