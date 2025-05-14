@@ -1,4 +1,5 @@
 #ece3 or ece4:
+dataset_type: #specify model version: ece3 or ece4
 kernels:
     era5:
       path_input: "/path/to/kernels/Huang_ERA5/"
@@ -20,6 +21,7 @@ file_paths:
 
 use_climatology: True
 use_ds_climatology: True
+use_atm_mask: True
 time_range: 
    start: ""
    end: ""

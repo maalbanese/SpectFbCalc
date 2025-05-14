@@ -1,0 +1,10 @@
+ece3:
+  rename_map:
+    # variable to rename
+  compute_map:
+    # variable to compute
+ece4:
+  rename_map:
+    # variable to rename
+
+# to be completed as needed
