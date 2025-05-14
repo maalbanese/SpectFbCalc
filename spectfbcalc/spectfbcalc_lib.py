@@ -775,13 +775,13 @@ def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, standard_names):
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
-    print(f"Time range used for the simulation analysis: {time_range_to_use}")
+    print(f"Time range used for the simulation analysis: {time_range_exp}")
 
     print("Upload reference climatology...")
     ref_clim_data = ref_clim(config_file, allvars, ker, standard_names, allkers=allkers) 
 
     print("Planck-Surface radiative anomaly computing...")
-    radiation = Rad_anomaly_planck_surf(ds, ref_clim_data, ker, allkers, cart_out, use_climatology, time_range_to_use, use_ds_climatology)
+    radiation = Rad_anomaly_planck_surf(ds, ref_clim_data, ker, allkers, cart_out, use_climatology, time_range_exp, use_ds_climatology)
 
     return (radiation)
 
@@ -917,7 +917,7 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
-    print(f"Time range used for the simulation analysis: {time_range_to_use}")
+    print(f"Time range used for the simulation analysis: {time_range_exp}")
 
     # Surface pressure management
     surf_pressure = None
@@ -939,7 +939,7 @@ def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, standard_names):
     ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
 
     print("Planck-Atmosphere-LapseRate radiative anomaly computing...")
-    radiation = Rad_anomaly_planck_atm_lr(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology, use_atm_mask)
+    radiation = Rad_anomaly_planck_atm_lr(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, config, use_ds_climatology, use_atm_mask)
 
     return (radiation)
 
@@ -1050,7 +1050,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
                 anoms_lr = (anoms_ok - ts_anom.groupby('time.month').mean())
                 anoms_unif = (anoms_ok - anoms_lr)
 
-    for tip in ['clr','cld']:
+    for tip in ['clr', 'cld']:
         print(f"Processing {tip}")  
         try:
             kernel = allkers[(tip, 't')]
@@ -1137,13 +1137,13 @@ def Rad_anomaly_albedo_wrapper(config_file: str, ker, standard_names):
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
-    print(f"Time range used for the simulation analysis: {time_range_to_use}")
+    print(f"Time range used for the simulation analysis: {time_range_exp}")
 
     print("Upload reference climatology...")
     ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
 
     print("Albedo radiative anomaly computing...")
-    radiation = Rad_anomaly_albedo(ds, ref_clim_data, ker, allkers, cart_out, use_climatology, time_range_to_use, use_ds_climatology)
+    radiation = Rad_anomaly_albedo(ds, ref_clim_data, ker, allkers, cart_out, use_climatology, time_range_exp, use_ds_climatology)
 
     return (radiation)
 
@@ -1268,11 +1268,9 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     
     cart_out = config['file_paths'].get("output")
     use_climatology = config.get("use_climatology", True)  # Default True
-    use_ds_climatology = config.get("use_climatology", True)
+    use_ds_climatology = config.get("use_ds_climatology", True)
     use_atm_mask = config.get("use_atm_mask",True)
     use_ds_climatology = bool(use_ds_climatology)
-    print('ds_climatology: ')
-    print(use_ds_climatology)
     use_climatology = bool(use_climatology) 
     use_atm_mask = bool(use_atm_mask)
 
@@ -1306,7 +1304,7 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, standard_names):
     ref_clim_data = ref_clim(config, allvars, ker, standard_names, allkers=allkers) 
 
     print("Water-Vapour radiative anomaly computing...")
-    radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, config, use_ds_climatology, use_atm_mask)
+    radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, config, use_ds_climatology, use_atm_mask)
 
     return (radiation)
 
@@ -1390,8 +1388,6 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
             if use_climatology==True:
                 anoms_ok3 = xr.apply_ufunc(lambda x, mean: np.log(x) - np.log(mean), var_int.groupby('time.month'), piok_int , dask = 'allowed')
                 coso3= anoms_ok3.groupby('time.month') *dlnws(ta_abs_pi)
-                process = psutil.Process(os.getpid())
-                print('total RAM memory used (anoms and coso):', process.memory_info().rss/1e9)
             else:
                 anoms_ok3 = xr.apply_ufunc(lambda x, mean: np.log(x) - np.log(mean), var_int, piok_int , dask = 'allowed')
                 coso3= anoms_ok3*dlnws(ta_abs_pi)
@@ -1438,8 +1434,6 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
 
 
         dRt_glob = ctl.global_mean(dRt)
-        process = psutil.Process(os.getpid())
-        print('total RAM memory used for global mean (no compute):', process.memory_info().rss/1e9)
         wv= dRt_glob.compute()
         radiation[(tip, 'water-vapor')]=wv
         wv.to_netcdf(cart_out+ "dRt_water-vapor_global_" +tip+cos +"-"+ker+"kernels.nc", format="NETCDF4")
@@ -1595,7 +1589,7 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
     # If `time_range_exp` is defined use it, otherwise use `time_range`
     time_range_to_use = time_range_exp if time_range_exp else time_range_clim
 
-    print(f"Time range used for the simulation analysis: {time_range_to_use}")
+    print(f"Time range used for the simulation analysis: {time_range_exp}")
 
     # Surface pressure management
     surf_pressure = None
@@ -1617,7 +1611,7 @@ def calc_fb_wrapper(config_file: str, ker, standard_names):
     allvars_combined = allvars + allvars1
     ref_clim_data = ref_clim(config_file, allvars_combined, ker, standard_names, allkers=allkers) 
     
-    fb_coef, fb_cloud, fb_cloud_err = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_to_use, use_ds_climatology, config_file, use_atm_mask)
+    fb_coef, fb_cloud, fb_cloud_err = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask)
 
     return fb_coef, fb_cloud, fb_cloud_err
 
@@ -1658,15 +1652,15 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
     if not os.path.exists(path):
         Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
     
-    print('planck atm')
-    path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+cos+"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology, use_atm_mask)
-    
     print('albedo')
     path = os.path.join(cart_out, "dRt_albedo_global_clr"+cos+"-"+ker+"kernels.nc")
     if not os.path.exists(path):
         Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, use_climatology, time_range, use_ds_climatology)
+    
+    print('planck atm')
+    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld"+cos+"-"+ker+"kernels.nc")
+    if not os.path.exists(path):
+        Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology, time_range, config_file, use_ds_climatology, use_atm_mask)
     
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+cos+"-"+ker+"kernels.nc")
@@ -1677,7 +1671,11 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
 
     #compute gtas
     k=allkers[('cld', 't')]
-    var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon) 
+    if time_range is not None:
+        var_tas = ds['tas'].sel(time=slice(time_range['start'], time_range['end'])) 
+        var_tas= ctl.regrid_dataset(var_tas, k.lat, k.lon)  
+    else:
+        var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon)
 
     if use_climatology == False:
         piok_tas=piok['tas'].drop('time')
