@@ -22,10 +22,10 @@ file_paths:
 use_climatology: True
 use_ds_climatology: True
 use_atm_mask: True
-time_range: 
+time_range: #this is the time range for the reference dataset 
    start: ""
    end: ""
-time_range_exp:
+time_range_exp: #this is the time range for the experiment dataset, give it empty if you want to use the same as the reference dataset
    start: ""
    end: ""
 time_chunk: 12
