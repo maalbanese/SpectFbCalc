@@ -22,6 +22,7 @@ file_paths:
 use_climatology: True
 use_ds_climatology: True
 use_atm_mask: True
+save_pattern: True
 time_range: #this is the time range for the reference dataset 
    start: ""
    end: ""
