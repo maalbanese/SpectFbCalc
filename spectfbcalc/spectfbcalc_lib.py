@@ -37,13 +37,12 @@ def mytestfunction():
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str, cart_out: str):
+def load_spectral_kernel(cart_k: str, cart_out: str, finam):
     """Loads and preprocesses STE kernels for further analysis."""  
     
     tips = ['cs','cld']
-    vnams = ['temp_jac', 'ts_jac', 'wv_jac', 'ozo_jac','ch4_jac', 'n2o_jac', 'co2_jac']
-    finam = 'spectral_kernel_ste_{}.nc'
-    
+    vnams = ['temp_jac', 'ts_jac', 'wv_jac']
+
     allkers = dict()
     
     for tip in tips:
@@ -61,22 +60,10 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
             if vna_local =='wv_jac':
                 kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
                 vna = 'wv_lw'
-            if vna_local =='ozo_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'o3_lw'
-            if vna_local =='ch4_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'ch4_lw'
-            if vna_local =='n2o_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'n2o'
-            if vna_local =='co2_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'co2_lw'
-            if tip == 'cs' or 'forum_cs':
-                tip = 'clr'
+
             
-            allkers[(tip, vna)] = kernels[vna_local].sel(freq=slice(650,2750)) #frequency selection 650-2750 cm-1 
+            #allkers[(tip, vna)] = kernels[vna_local].sel(freq=slice(650,2750)) #frequency selection 650-2750 cm-1 
+            allkers[(tip, vna)] = kernels[vna_local] #frequency selection 110-2750 cm-1 
             
             #Save all kernels, t kernel and pressure levels to an external file
             k = allkers[('cld', 't')]
@@ -256,6 +243,11 @@ def load_kernel_wrapper(ker, config_file: str):
        cart_out = config['kernels']['huang']['path_output']
        finam = config['kernels']['huang']['filename_template']
     
+    if ker=='STE':
+       #da modificare
+       cart_k = config['kernels']['huang']['path_input']
+       cart_out = config['kernels']['huang']['path_output']
+       finam = config['kernels']['huang']['filename_template']    
      
     allkers = load_kernel(ker, cart_k, cart_out, finam)
 
@@ -266,7 +258,8 @@ def load_kernel(ker, cart_k, cart_out, finam):
          allkers=load_kernel_ERA5(cart_k, cart_out, finam)
     if ker=='HUANG':
          allkers=load_kernel_HUANG(cart_k, cart_out, finam)
-
+    if ker =='STE':
+         allkers = load_spectral_kernel(cart_k, cart_out, finam)
     return allkers
 
 ###### LOAD AND CHECK DATA
@@ -829,15 +822,8 @@ def Rad_anomaly_spectral_planck_surf_core(ds, allkers, ker:str, use_climatology=
 
         # Prodotto 
 
-        if ker=='STE':
-
-            dRt = anoms_monthly*kernel 
-            dRt_glob = ctl.global_mean(dRt)
-
-        if ker=='HUANG':
-
-            dRt = anoms_monthly*kernel 
-            dRt_glob = ctl.global_mean(dRt)
+        dRt = anoms_monthly*kernel 
+        dRt_glob = ctl.global_mean(dRt)
 
         planck= dRt_glob.compute()
         feedbacks[(tip, 'planck-surf')] = planck
@@ -902,17 +888,9 @@ def Rad_anomaly_spectral_planck_atmo_core(ds, allkers, ker:str, use_climatology=
 
         # Prodotto 
 
-        if ker=='STE':
-
-            dRt = anoms_monthly*kernel 
-            dRt = dRt.sum(dim="level")
-            dRt_glob = ctl.global_mean(dRt)
-
-        if ker=='HUANG':
-
-            dRt = anoms_monthly*kernel 
-            dRt_glob = ctl.global_mean(dRt)
-
+        dRt = anoms_monthly*kernel 
+        dRt = dRt.sum(dim="level")
+        dRt_glob = ctl.global_mean(dRt)
         planck = dRt_glob.compute()
         feedbacks[(tip, 'planck-atmo')] = planck
 
@@ -975,17 +953,9 @@ def Rad_anomaly_spectral_wv_core(ds, allkers, ker:str, use_climatology=True, ref
 
         # Prodotto 
 
-        if ker=='STE':
-            # WV in ppmv
-            dRt = anoms_monthly*kernel 
-            dRt = dRt.sum(dim="level")
-            dRt_glob = ctl.global_mean(dRt)
-
-        if ker=='HUANG':
-            # CAMBIA TUTTO
-            dRt = anoms_monthly*kernel 
-            dRt_glob = ctl.global_mean(dRt)
-
+        dRt = anoms_monthly*kernel 
+        dRt = dRt.sum(dim="level")
+        dRt_glob = ctl.global_mean(dRt)
         planck= dRt_glob.compute()
         feedbacks[(tip, 'wv')] = planck
 
