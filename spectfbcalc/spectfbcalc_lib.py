@@ -2134,6 +2134,7 @@ def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
     use_ds_climatology = bool(use_ds_climatology)
     use_atm_mask = bool(use_atm_mask)
     save_pattern = bool(save_pattern)
+    num=10#da modificare
 
     # Read time ranges from config
     time_range_clim = config.get("time_range", {})
@@ -2190,7 +2191,8 @@ def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
         anoms_tas = var_tas.groupby('time.month') - ref_clim_data['tas']
         
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time') 
-    gtas= gtas.groupby((gtas.year-1) // 10 * 10).mean()
+    start_year = int(gtas.year.min())
+    gtas= gtas.groupby((gtas.year-start_year) // num * num).mean()
 
     fb_cloud, fb_cloud_err = feedback_cloud(ds, ref_clim_data, fb_coef, gtas, time_range_exp)
 
