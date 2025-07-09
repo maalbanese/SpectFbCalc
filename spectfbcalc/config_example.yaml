@@ -23,6 +23,7 @@ use_climatology: True
 use_ds_climatology: True
 use_atm_mask: True
 save_pattern: True
+num_year_regr: 10 #number of years to group for regression
 time_range: #this is the time range for the reference dataset 
    start: ""
    end: ""

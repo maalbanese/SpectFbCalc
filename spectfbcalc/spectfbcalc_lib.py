@@ -1955,6 +1955,7 @@ def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
     use_ds_climatology = bool(use_ds_climatology)
     use_atm_mask = bool(use_atm_mask)
     save_pattern = bool(save_pattern)
+    num=config.get("num_year_regr", 10)
 
     # Read time ranges from config
     time_range_clim = config.get("time_range", {})
@@ -1992,7 +1993,7 @@ def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
     print("Upload reference climatology...")
     ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
     
-    fb_coef, fb_cloud, fb_cloud_err, fb_pattern = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern)
+    fb_coef, fb_cloud, fb_cloud_err, fb_pattern = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern, num)
     
     return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
 
@@ -2101,7 +2102,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
     
     #cloud
     print('cloud feedback calculation...')
-    fb_cloud, fb_cloud_err = feedback_cloud(ds, piok, fb_coef, gtas, time_range)
+    fb_cloud, fb_cloud_err = feedback_cloud(ds, piok, fb_coef, gtas, time_range, num)
     
     return fb_coef, fb_cloud, fb_cloud_err, (fb_pattern if save_pattern else None)
     
@@ -2134,7 +2135,7 @@ def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
     use_ds_climatology = bool(use_ds_climatology)
     use_atm_mask = bool(use_atm_mask)
     save_pattern = bool(save_pattern)
-    num=10#da modificare
+    num=config.get("num_year_regr", 10)
 
     # Read time ranges from config
     time_range_clim = config.get("time_range", {})
@@ -2174,7 +2175,7 @@ def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
     allvars_combined = allvars + allvars1
     ref_clim_data = ref_clim(config_file, allvars_combined, ker, variable_mapping_file, allkers=allkers) 
 
-    fb_coef = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern)
+    fb_coef = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern, num)
 
     k=allkers[('cld', 't')]
     for nom in allvars1:
@@ -2194,7 +2195,7 @@ def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
     start_year = int(gtas.year.min())
     gtas= gtas.groupby((gtas.year-start_year) // num * num).mean()
 
-    fb_cloud, fb_cloud_err = feedback_cloud(ds, ref_clim_data, fb_coef, gtas, time_range_exp)
+    fb_cloud, fb_cloud_err = feedback_cloud(ds, ref_clim_data, fb_coef, gtas, time_range_exp, num)
 
     return fb_cloud, fb_cloud_err
 
