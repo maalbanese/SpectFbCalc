@@ -1998,7 +1998,7 @@ def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
     #return fb_coef, fb_cloud, fb_cloud_err
     return fb_coef, fb_pattern if save_pattern else None
 
-def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=True, config_file =None, use_atm_mask=True, save_pattern=False):
+def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=True, config_file =None, use_atm_mask=True, save_pattern=False, num=10):
     """
     Compute the radiative feedback and cloud feedback based on the provided datasets and kernels.
     
@@ -2074,14 +2074,14 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
         
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
-    gtas = gtas.groupby((gtas.year-start_year) // 10 * 10).mean()
+    gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
 
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
             feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ cos+"-"+ker+"kernels.nc",  use_cftime=True)
             start_year = int(feedbacks.year.min())
-            feedback=feedbacks.groupby((feedbacks.year-start_year) // 10 * 10).mean()
+            feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
 
             res = stats.linregress(gtas, feedback)
             fb_coef[(tip, fbn)] = res
@@ -2196,7 +2196,7 @@ def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
 
     return fb_cloud, fb_cloud_err
 
-def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None):
+def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
    #questo va testato perchè non sono sicura che funzionino le cose con pimean (calcolato con climatology ha il groupby.month di cui qui non si tiene conto)
     """
     Computes cloud radiative feedback anomalies using climate model data.
@@ -2245,9 +2245,9 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None):
     N0_glob = ctl.global_mean(N0).compute()
 
     start_year = int(crf_glob.year.min())
-    crf_glob= crf_glob.groupby((crf_glob.year-start_year) // 10 * 10).mean(dim='year')
-    N_glob=N_glob.groupby((N_glob.year-start_year) // 10 * 10).mean(dim='year')
-    N0_glob=N0_glob.groupby((N0_glob.year-start_year) // 10 * 10).mean(dim='year')
+    crf_glob= crf_glob.groupby((crf_glob.year-start_year) // num * num).mean(dim='year')
+    N_glob=N_glob.groupby((N_glob.year-start_year) // num * num).mean(dim='year')
+    N0_glob=N0_glob.groupby((N0_glob.year-start_year) // num * num).mean(dim='year')
 
     res_N = stats.linregress(surf_anomaly, N_glob)
     res_N0 = stats.linregress(surf_anomaly, N0_glob)
