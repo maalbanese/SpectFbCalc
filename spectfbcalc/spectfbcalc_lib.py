@@ -356,8 +356,8 @@ def standardize_names(ds, dataset_type="ece3", configvar_file="configvariable.ym
         Dataset with renamed and computed variables.
     """
     mapping = load_variable_mapping(configvar_file, dataset_type)
-    rename_map = mapping.get("rename_map", {})
-    compute_map = mapping.get("compute_map", {})
+    rename_map = mapping.get("rename_map", {}) or {}
+    compute_map = mapping.get("compute_map", {}) or {}
 
     # Apply renaming
     existing_renames = {old: new for old, new in rename_map.items() if old in ds.variables}
@@ -1987,16 +1987,16 @@ def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
             surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
             surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
         else:
-            print("Using surface pressure passed as an array.")
-
+            raise ValueError("HUANG kernels require surface pressure data, but none was provided.")
+        
     print("Upload reference climatology...")
     ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
     
-    fb_coef, fb_pattern = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern)
-    #fb_coef, fb_cloud, fb_cloud_err = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern)
+    fb_coef, fb_cloud, fb_cloud_err, fb_pattern = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern)
+    
+    return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
 
-    #return fb_coef, fb_cloud, fb_cloud_err
-    return fb_coef, fb_pattern if save_pattern else None
+   
 
 def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=True, config_file =None, use_atm_mask=True, save_pattern=False, num=10):
     """
@@ -2026,8 +2026,8 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
 
     if 'tas' not in piok:
         raise ValueError("Reference climatology for 'tas' is missing in piok. Ensure 'tas' is included in 'allvars' when calling ref_clim.")
-
-    if use_climatology==True:
+    
+    if use_climatology==True: 
         cos="_climatology"
         print(cos)
     else:
@@ -2071,7 +2071,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
         anoms_tas = var_tas - piok_tas
     else:
         anoms_tas = var_tas.groupby('time.month') - piok['tas']
-        
+
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
     gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
@@ -2103,7 +2103,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
     print('cloud feedback calculation...')
     fb_cloud, fb_cloud_err = feedback_cloud(ds, piok, fb_coef, gtas, time_range)
     
-    return fb_coef, fb_cloud, fb_cloud_err, fb_pattern if save_pattern else None
+    return fb_coef, fb_cloud, fb_cloud_err, (fb_pattern if save_pattern else None)
     
 
 #CLOUD FEEDBACK shell 2008
