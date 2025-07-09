@@ -2072,14 +2072,16 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
     else:
         anoms_tas = var_tas.groupby('time.month') - piok['tas']
         
-    gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time') 
-    gtas = gtas.groupby((gtas.year-1) // 10 * 10).mean()
+    gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
+    start_year = int(gtas.year.min()) 
+    gtas = gtas.groupby((gtas.year-start_year) // 10 * 10).mean()
 
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
             feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ cos+"-"+ker+"kernels.nc",  use_cftime=True)
-            feedback=feedbacks.groupby((feedbacks.year-1) // 10 * 10).mean()
+            start_year = int(feedbacks.year.min())
+            feedback=feedbacks.groupby((feedbacks.year-start_year) // 10 * 10).mean()
 
             res = stats.linregress(gtas, feedback)
             fb_coef[(tip, fbn)] = res
@@ -2090,10 +2092,12 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
                 feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+cos+"-"+ker+"kernels.nc", use_cftime=True)
                 feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - 1) // 10 * 10).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
-                gtas = gtas.chunk({'year': -1})
+                gtas1 = gtas.chunk({'year': -1})
                 # Perform regression at each grid point
-                slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
+                slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas1)
                 fb_pattern[(tip, fbn)] = (slope, stderr)
+                slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + cos + "-" + ker + "kernels.nc", format="NETCDF4")
+                stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + cos + "-" + ker + "kernels.nc", format="NETCDF4")
     
     #cloud
     print('cloud feedback calculation...')
@@ -2217,15 +2221,15 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None):
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     
     if time_range is not None:
-        nomi='rlut rsut rlutcs rsutcs'.split()
-        for nom in nomi:
-            ds[nom] = ds[nom].sel(time=slice(time_range[0], time_range[1]))
-
-
-    rlut=ds['rlut']
-    rsut=ds['rsut']
-    rsutcs = ds['rsutcs']
-    rlutcs = ds['rlutcs']
+        rlut=ds['rlut'].sel(time=slice(time_range['start'], time_range['end']))
+        rsut=ds['rsut'].sel(time=slice(time_range['start'], time_range['end']))
+        rsutcs=ds['rsutcs'].sel(time=slice(time_range['start'], time_range['end']))
+        rlutcs = ds['rlutcs'].sel(time=slice(time_range['start'], time_range['end']))
+    else:
+        rlut=ds['rlut']
+        rsut=ds['rsut']
+        rsutcs = ds['rsutcs']
+        rlutcs = ds['rlutcs']
 
     N = - rlut - rsut
     N0 = - rsutcs - rlutcs
@@ -2240,9 +2244,10 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None):
     N_glob = ctl.global_mean(N).compute()
     N0_glob = ctl.global_mean(N0).compute()
 
-    crf_glob= crf_glob.groupby((crf_glob.year-1) // 10 * 10).mean(dim='year')
-    N_glob=N_glob.groupby((N_glob.year-1) // 10 * 10).mean(dim='year')
-    N0_glob=N0_glob.groupby((N0_glob.year-1) // 10 * 10).mean(dim='year')
+    start_year = int(crf_glob.year.min())
+    crf_glob= crf_glob.groupby((crf_glob.year-start_year) // 10 * 10).mean(dim='year')
+    N_glob=N_glob.groupby((N_glob.year-start_year) // 10 * 10).mean(dim='year')
+    N0_glob=N0_glob.groupby((N0_glob.year-start_year) // 10 * 10).mean(dim='year')
 
     res_N = stats.linregress(surf_anomaly, N_glob)
     res_N0 = stats.linregress(surf_anomaly, N0_glob)
