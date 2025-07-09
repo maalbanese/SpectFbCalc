@@ -2091,7 +2091,8 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
                 feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+cos+"-"+ker+"kernels.nc", use_cftime=True)
-                feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - 1) // 10 * 10).mean('year')
+                start_year = int(feedbacks_pattern.year.min())
+                feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num * num).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
                 gtas1 = gtas.chunk({'year': -1})
                 # Perform regression at each grid point
