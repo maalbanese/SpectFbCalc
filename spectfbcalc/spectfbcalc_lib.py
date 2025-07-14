@@ -1993,11 +1993,9 @@ def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
     print("Upload reference climatology...")
     ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
     
-    fb_coef, fb_cloud, fb_cloud_err, fb_pattern = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern, num)
+    fb_coef, fb_cloud, fb_cloud_err, fb_pattern, fb_cloud_pattern = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, use_climatology, time_range_exp, use_ds_climatology, config_file, use_atm_mask, save_pattern, num)
     
-    return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
-
-   
+    return fb_coef, fb_cloud, fb_cloud_err, fb_pattern, fb_cloud_pattern
 
 def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, use_ds_climatology=True, config_file =None, use_atm_mask=True, save_pattern=False, num=10):
     """
@@ -2076,6 +2074,8 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
     gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
+    if save_pattern:
+        gtas = gtas.chunk({'year': -1})
 
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
@@ -2094,18 +2094,21 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=Tru
                 start_year = int(feedbacks_pattern.year.min())
                 feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num * num).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
-                gtas1 = gtas.chunk({'year': -1})
                 # Perform regression at each grid point
-                slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas1)
+                slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
                 fb_pattern[(tip, fbn)] = (slope, stderr)
                 slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + cos + "-" + ker + "kernels.nc", format="NETCDF4")
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + cos + "-" + ker + "kernels.nc", format="NETCDF4")
     
     #cloud
     print('cloud feedback calculation...')
-    fb_cloud, fb_cloud_err = feedback_cloud(ds, piok, fb_coef, gtas, time_range, num)
+    if save_pattern:
+        fb_cloud, fb_cloud_err, fb_cloud_pattern = feedback_cloud(ds, piok, fb_coef, gtas, time_range, save_pattern)
+    else:
+        fb_cloud, fb_cloud_err, _ = feedback_cloud(ds, piok, fb_coef, gtas, time_range, save_pattern)
+        fb_cloud_pattern = None
     
-    return fb_coef, fb_cloud, fb_cloud_err, (fb_pattern if save_pattern else None)
+    return fb_coef, fb_cloud, fb_cloud_err, (fb_pattern if save_pattern else None), (fb_cloud_pattern if save_pattern else None)
     
 
 #CLOUD FEEDBACK shell 2008
@@ -2196,11 +2199,11 @@ def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
     start_year = int(gtas.year.min())
     gtas= gtas.groupby((gtas.year-start_year) // num * num).mean()
 
-    fb_cloud, fb_cloud_err = feedback_cloud(ds, ref_clim_data, fb_coef, gtas, time_range_exp, num)
+    fb_cloud, fb_cloud_err = feedback_cloud(ds, ref_clim_data, fb_coef, gtas, time_range_exp, num, save_pattern)
 
-    return fb_cloud, fb_cloud_err
+    return fb_cloud, fb_cloud_err, (fb_cloud_pattern if save_pattern else None)
 
-def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
+def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10, save_pattern=False):
    #questo va testato perchè non sono sicura che funzionino le cose con pimean (calcolato con climatology ha il groupby.month di cui qui non si tiene conto)
     """
     Computes cloud radiative feedback anomalies using climate model data.
@@ -2225,21 +2228,24 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     
     if time_range is not None:
-        rlut=ds['rlut'].sel(time=slice(time_range['start'], time_range['end']))
-        rsut=ds['rsut'].sel(time=slice(time_range['start'], time_range['end']))
-        rsutcs=ds['rsutcs'].sel(time=slice(time_range['start'], time_range['end']))
-        rlutcs = ds['rlutcs'].sel(time=slice(time_range['start'], time_range['end']))
-    else:
-        rlut=ds['rlut']
-        rsut=ds['rsut']
-        rsutcs = ds['rsutcs']
-        rlutcs = ds['rlutcs']
+        nomi='rlut rsut rlutcs rsutcs'.split()
+        for nom in nomi:
+            ds[nom] = ds[nom].sel(time=slice(time_range['start'], time_range['end']))
+
+    rlut=ds['rlut']
+    rsut=ds['rsut']
+    rsutcs = ds['rsutcs']
+    rlutcs = ds['rlutcs']
 
     N = - rlut - rsut
     N0 = - rsutcs - rlutcs
 
     crf = (N0 - N) 
     crf = crf.groupby('time.year').mean('time')
+
+    lat_target = np.linspace(-90, 90, 73)
+    lon_target = np.linspace(0, 357.5, 144)
+    crf = ctl.regrid_dataset(crf, lat_target, lon_target)
 
     N = N.groupby('time.year').mean('time')
     N0 = N0.groupby('time.year').mean('time')
@@ -2271,7 +2277,18 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
 
     fb_cloud_err = np.sqrt(res_crf.stderr**2 + np.nansum([fb_coef[('cld', fbn)].stderr**2 for fbn in fbnams]))
 
-    return fb_cloud, fb_cloud_err
+    fb_cloud_pattern = None
+    if save_pattern:
+        print("Computing cloud feedback spatial pattern...")
+        # Compute annual and decadal means
+        crf['year'] = crf['year']  
+        crf = crf.groupby((crf.year-start_year) // num * num).mean('year')
+        crf = crf.chunk({'year': -1})
+        surf_anomaly = surf_anomaly.chunk({'year': -1})
+        slope, stderr = regress_pattern_vectorized(crf, surf_anomaly)
+        fb_cloud_pattern = {('cld', 'cloud'): (slope, stderr)}
+
+    return fb_cloud, fb_cloud_err, (fb_cloud_pattern if save_pattern else None)
 
 
 ###### Plotting ######
