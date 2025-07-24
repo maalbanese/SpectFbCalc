@@ -243,11 +243,11 @@ def load_kernel_wrapper(ker, config_file: str):
        cart_out = config['kernels']['huang']['path_output']
        finam = config['kernels']['huang']['filename_template']
     
-    if ker=='STE':
+    if ker=='SPECTRAL':
        #da modificare
-       cart_k = config['kernels']['huang']['path_input']
-       cart_out = config['kernels']['huang']['path_output']
-       finam = config['kernels']['huang']['filename_template']    
+       cart_k = config['kernels']['spect']['path_input']
+       cart_out = config['kernels']['spect']['path_output']
+       finam = config['kernels']['spect']['filename_template']    
      
     allkers = load_kernel(ker, cart_k, cart_out, finam)
 
@@ -258,7 +258,7 @@ def load_kernel(ker, cart_k, cart_out, finam):
          allkers=load_kernel_ERA5(cart_k, cart_out, finam)
     if ker=='HUANG':
          allkers=load_kernel_HUANG(cart_k, cart_out, finam)
-    if ker =='STE':
+    if ker =='SPECTRAL':
          allkers = load_spectral_kernel(cart_k, cart_out, finam)
     return allkers
 
@@ -1109,9 +1109,12 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, use_climatology=Tr
             print(f"Error loading kernel for {tip}: {e}")  
             continue  
         if use_ds_climatology == False:
-           dRt = (anoms.groupby('time.month') * kernel).groupby('time.year').mean('time')
+            if ker == 'SPECTRAL':
+                dRt = anoms.groupby('time.month')*kernel
+            else:
+                dRt = (anoms.groupby('time.month') * kernel).groupby('time.year').mean('time')
         else:
-           dRt = (anoms* kernel).mean('month')
+            dRt = (anoms* kernel).mean('month')
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
@@ -1304,28 +1307,23 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
             anoms_ok=var.groupby('time.month').mean() - piok['ta']
             ts_anom = var_ts.groupby('time.month') - piok['ts']
             ts_anom = ts_anom.compute()
-        mask=mask_atm(var)
-        mask = mask.groupby('time.month').mean()
+        if use_atm_mask==True:
+            mask=mask_atm(var)
+            mask = mask.groupby('time.month').mean()
 
     if use_atm_mask==True:
         anoms_ok = (anoms_ok*mask).interp(plev = cose) 
     else:
         anoms_ok = anoms_ok.interp(plev = cose)
 
-    if ker=='HUANG':
-        if use_ds_climatology == False:
-                anoms_lr = (anoms_ok - ts_anom)  
-                anoms_unif = (anoms_ok - anoms_lr)
-        else: 
-                anoms_lr = (anoms_ok - ts_anom.mean('time'))
-                anoms_unif = (anoms_ok - anoms_lr)
-    if ker=='ERA5':
-        if use_ds_climatology == False:
-                anoms_lr = (anoms_ok - ts_anom)  
-                anoms_unif = (anoms_ok - anoms_lr)
-        else: 
-                anoms_lr = (anoms_ok - ts_anom.groupby('time.month').mean())
-                anoms_unif = (anoms_ok - anoms_lr)
+    if use_ds_climatology == False:
+        anoms_lr = (anoms_ok - ts_anom)  
+        anoms_unif = (anoms_ok - anoms_lr)
+    else: 
+        anoms_lr = (anoms_ok - ts_anom.groupby('time.month').mean())
+        anoms_unif = (anoms_ok - anoms_lr)
+    
+
 
     for tip in ['clr', 'cld']:
         print(f"Processing {tip}")  
@@ -1352,6 +1350,14 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
                 dRt_unif = ((anoms_unif)*(kernel*vlevs.dp/100)).sum('player').mean('month')  
                 dRt_lr = ((anoms_lr)*(kernel*vlevs.dp/100)).sum('player').mean('month') 
 
+        if ker=='SPECTRAL':
+            if use_ds_climatology == False:
+                dRt_unif = (anoms_unif.groupby('time.month')*kernel).sum(dim="level")
+                dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="level")
+            else:
+                dRt_unif = (anoms_unif*kernel).sum(dim="level")
+                dRt_lr = (anoms_lr*kernel).sum(dim="level")
+        
         #Save full dRt pattern before global averaging
         if save_pattern:
             dRt_unif.name = "dRt_atmo"
@@ -1625,7 +1631,7 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, variable_mapping_file: str):
     
     return (radiation)
 
-def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatology=True, time_range=None, config_file=None, use_ds_climatology=True, use_atm_mask=True, save_pattern=False):
+def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure=None, use_climatology=True, time_range=None, config_file=None, use_ds_climatology=True, use_atm_mask=True, save_pattern=False):
     
     """
     Computes the water vapor radiation anomaly using climate model data and radiative kernels.
@@ -1739,23 +1745,61 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
         if ker=='HUANG':
             if use_ds_climatology==False:
                 dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('player').groupby('time.year').mean('time')
+                dRt_lw = (coso3.groupby('time.month')* kernel_lw* wid_mask/100).sum('player').groupby('time.year').mean('time')
+                dRt_sw = (coso3.groupby('time.month')* kernel_sw* wid_mask/100).sum('player').groupby('time.year').mean('time')
             else:
                 dRt = (coso3* kernel* wid_mask/100).sum('player').mean('month')
+                dRt_lw = (coso3* kernel_lw* wid_mask/100).sum('player').mean('month')
+                dRt_sw = (coso3* kernel_sw* wid_mask/100).sum('player').mean('month')
 
         if ker=='ERA5':
             if use_ds_climatology==False:
                 dRt = (coso.groupby('time.month')*( kernel* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')
+                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')
+                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')
             else:
                 dRt = (coso*( kernel* vlevs.dp / 100)).sum('player').mean('month')
+                dRt_lw = (coso*( kernel_lw* vlevs.dp / 100)).sum('player').mean('month')
+                dRt_sw = (coso*( kernel_sw* vlevs.dp / 100)).sum('player').mean('month')
 
+        if ker=='SPECTRAL':
+            if use_ds_climatology==False:
+                if use_climatology==False:
+                    anoms= var_int-piok_int
+                else:
+                    anoms= var_int.groupby('time.month')-piok_int
+                dRt= (anoms.groupby('time.month')*kernel).sum(dim="level")
+            else:
+                if use_climatology==False:
+                    anoms= var_int.groupby('time.month').mean()-piok_int.groupby('time.month').mean()
+                else:
+                    anoms= var_int.groupby('time.month').mean()-piok_int
+                dRt = (anoms*kernel).sum(dim="level")
 
+      
         #Save full dRt pattern before global averaging
         if save_pattern:
             dRt.name = "dRt"
             dRt.attrs["description"] = f"{tip} water vapor dRt pattern"
             dRt.to_netcdf(cart_out + "dRt_water-vapor_pattern_" + tip + cos + "-" + ker + "kernels.nc", format="NETCDF4")
-
+            if ker != 'SPECTRAL':
+                dRt_lw.name = "dRt_lw"
+                dRt_lw.attrs["description"] = f"{tip} water vapor dRt_lw pattern"
+                dRt_lw.to_netcdf(cart_out + "dRt_lw_water-vapor_pattern_" + tip + cos + "-" + ker + "kernels.nc", format="NETCDF4")
+                dRt_sw.name = "dRt_sw"
+                dRt_sw.attrs["description"] = f"{tip} water vapor dRt_sw pattern"
+                dRt_sw.to_netcdf(cart_out + "dRt_sw_water-vapor_pattern_" + tip + cos + "-" + ker + "kernels.nc", format="NETCDF4")
+            
+           
         #Then compute and save global mean
+        if ker != 'SPECTRAL':
+            dRt_glob_lw = ctl.global_mean(dRt_lw)
+            wv_lw= dRt_glob_lw.compute()
+            wv_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+cos +"-"+ker+"kernels.nc", format="NETCDF4")
+            dRt_glob_sw = ctl.global_mean(dRt_sw)
+            wv_sw= dRt_glob_sw.compute()
+            wv_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+cos +"-"+ker+"kernels.nc", format="NETCDF4")
+
         dRt_glob = ctl.global_mean(dRt)
         wv= dRt_glob.compute()
         radiation[(tip, 'water-vapor')]=wv

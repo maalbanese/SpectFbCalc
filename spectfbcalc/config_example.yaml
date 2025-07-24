@@ -9,6 +9,10 @@ kernels:
       path_input: "/path/to/kernels/Huang/toa/"
       path_output: "/path/to/kernels/output/"
       filename_template: "RRTMG_{}_toa_{}_highR.nc"
+    spect:
+      path_input: "/path/to/kernels/spectral/toa/"
+      path_output: "/path/to/kernels/output/"
+      filename_template: "spectral_{}_kernel_longwave_{}.nc" 
 
 file_paths:
    reference_dataset: "/path/to/reference_data/"
