@@ -330,7 +330,8 @@ def plot_single_feedback_file(feedback_file, sim_label="exp1", save_path="feedba
     plt.savefig(save_path)
     plt.show()
 
-# --------- Parameterized Plotting ------------
+# --------- Plot dRt for each feedback and for different parameters change variation ------------
+# Add plot of each parameter with all change variations value?
 def plot_dRt_fb_all_params(base_folder, xlabel, ylabel, title, feedback_file, output_file=None, subfolder_pattern="*", param_map=None, param_order=None, show_zero_line=True, mapping_file="param_mappings.yml", model_type=None):
     """
     Plot dRt values for different parameters. Supports flexible mappings via dictionary or YAML.

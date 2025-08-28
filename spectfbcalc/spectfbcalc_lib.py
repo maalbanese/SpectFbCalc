@@ -270,7 +270,6 @@ def load_kernel(ker, cart_k, cart_out, finam):
     return allkers
 
 ###### LOAD AND CHECK DATA
-
 def read_data(config_file: str, variable_mapping_file: str = "configvariable.yml") -> xr.Dataset:
     """
     Reads the configuration from the YAML file, opens the NetCDF file specified in the config,
@@ -709,7 +708,7 @@ def dlnws(T):
    
     return dws
 
-
+############# SPATIAL PATTERN FUNCTION #############
 def regress_pattern_vectorized(feedback_data, gtas):
     """
     Perform a linear regression between feedback_data (lat, lon, year) and gtas (year)
@@ -769,11 +768,9 @@ def regress_pattern_vectorized(feedback_data, gtas):
     )
 
     return slope, stderr
-
-
+        
 ############# NEW FUNCTIONS FOR SPECTRAL KERNELS ########################
 # LOAD KERNEL PLANK SURFACE
-
 
 def Rad_anomaly_spectral_planck_surf_core(ds, allkers, ker:str, use_climatology=True, ref_clim=None, lat_range=None, lon_range=None, time_chunk=12):
 
@@ -843,8 +840,6 @@ def Rad_anomaly_spectral_planck_surf_core(ds, allkers, ker:str, use_climatology=
         feedbacks[(tip, 'planck-surf')] = planck
 
     return(feedbacks)
-
-
 
 def Rad_anomaly_spectral_planck_atmo_core(ds, allkers, ker:str, use_climatology=True, ref_clim=None, lat_range=None, lon_range=None, time_chunk=12):
 
@@ -918,7 +913,6 @@ def Rad_anomaly_spectral_planck_atmo_core(ds, allkers, ker:str, use_climatology=
 
     return(feedbacks)
 
-
 def Rad_anomaly_spectral_wv_core(ds, allkers, ker:str, use_climatology=True, ref_clim=None, lat_range=None, lon_range=None, time_chunk=12):
 
     """  Computes the radiative anomalies due to water vapor concentration using  water vapor concentration anomalies and precomputed kernels.
@@ -990,7 +984,6 @@ def Rad_anomaly_spectral_wv_core(ds, allkers, ker:str, use_climatology=True, ref
         feedbacks[(tip, 'wv')] = planck
 
     return(feedbacks)
-
 
 # FUNCTION FOR WV ANOMALIES
 # From Mass mixing Ratio (kg/kg to ppmv)
@@ -1752,7 +1745,7 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, use_climatol
                 coso = (anoms/piok_int) * (ta_abs_pi**2) * Rv/Lv
             else:
                 anoms= var_int.groupby('time.month')-piok_int
-                coso = (anoms.groupby('time.month')/piok_int).groupby('time.month') * (ta_abs_pi**2) * Rv/Lv #dlnws(ta_abs_pi) you can also use the functio
+                coso = (anoms.groupby('time.month')/piok_int).groupby('time.month') * (ta_abs_pi**2) * Rv/Lv 
         else: 
             if use_climatology==False:
                 anoms= var_int.groupby('time.month').mean()-piok_int.groupby('time.month').mean()
