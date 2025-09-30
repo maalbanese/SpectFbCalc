@@ -61,17 +61,18 @@ def load_spectral_kernel(cart_k: str, cart_out: str, finam):
                 kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
                 vna = 'wv_lw'
 
-            
-            #allkers[(tip, vna)] = kernels[vna_local].sel(freq=slice(650,2750)) #frequency selection 650-2750 cm-1 
-            allkers[(tip, vna)] = kernels[vna_local] #frequency selection 110-2750 cm-1 
+            if tip =='cs':
+                allkers[('clr', vna)] = kernels[vna_local]
+            else:
+                allkers[(tip, vna)] = kernels[vna_local] #frequency selection 110-2750 cm-1 
             
             #Save all kernels, t kernel and pressure levels to an external file
-            k = allkers[('cld', 't')]
             vlevs = xr.load_dataset( cart_k + finam.format(tip),chunks={'time':12})['lev']
             vlevs = vlevs.rename({'lev': 'player'})
-            pickle.dump(k, open(cart_out + 'k_STE.p', 'wb'))
-            pickle.dump(allkers, open(cart_out + 'allkers_STE.p', 'wb'))
-            pickle.dump(vlevs, open(cart_out + 'vlevs_ERA5.p', 'wb')) #save vlevs
+            pickle.dump(allkers, open(cart_out + 'allkers_SPECTRAL.p', 'wb'))
+            pickle.dump(vlevs, open(cart_out + 'vlevs_SPECTRAL.p', 'wb')) #save vlevs
+            cose = 100*vlevs.player
+            pickle.dump(cose, open(cart_out + 'cose_SPECTRAL.p', 'wb'))
     
     return allkers
 
@@ -1352,11 +1353,11 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
 
         if ker=='SPECTRAL':
             if use_ds_climatology == False:
-                dRt_unif = (anoms_unif.groupby('time.month')*kernel).sum(dim="level")
-                dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="level")
+                dRt_unif = (anoms_unif.groupby('time.month')*kernel).sum(dim="player")
+                dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="player")
             else:
-                dRt_unif = (anoms_unif*kernel).sum(dim="level")
-                dRt_lr = (anoms_lr*kernel).sum(dim="level")
+                dRt_unif = (anoms_unif*kernel).sum(dim="player")
+                dRt_lr = (anoms_lr*kernel).sum(dim="player")
         
         #Save full dRt pattern before global averaging
         if save_pattern:
@@ -1737,10 +1738,14 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure=None, use_cli
                 anoms= var_int.groupby('time.month').mean()-piok_int
                 coso = (anoms/piok_int) * (ta_abs_pi**2) * Rv/Lv
     
-    for tip in ['clr','cld']:
-        kernel_lw = allkers[(tip, 'wv_lw')]
-        kernel_sw = allkers[(tip, 'wv_sw')]
-        kernel = kernel_lw + kernel_sw
+    for tip in ['cld', 'clr']:
+        if ker != 'SPECTRAL':
+            kernel_lw = allkers[(tip, 'wv_lw')]
+            kernel_sw = allkers[(tip, 'wv_sw')]
+            kernel = kernel_lw + kernel_sw
+        else:
+            kernel_lw = allkers[(tip, 'wv_lw')]
+            kernel= kernel_lw
         
         if ker=='HUANG':
             if use_ds_climatology==False:
@@ -1763,18 +1768,21 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure=None, use_cli
                 dRt_sw = (coso*( kernel_sw* vlevs.dp / 100)).sum('player').mean('month')
 
         if ker=='SPECTRAL':
+
+            var_wv = q_to_ppmv(var_int)
+            piok_wv =q_to_ppmv(piok_int)
             if use_ds_climatology==False:
                 if use_climatology==False:
-                    anoms= var_int-piok_int
+                    anoms= var_wv-piok_wv
                 else:
-                    anoms= var_int.groupby('time.month')-piok_int
-                dRt= (anoms.groupby('time.month')*kernel).sum(dim="level")
+                    anoms= var_wv.groupby('time.month')-piok_wv
+                dRt= (anoms.groupby('time.month')*kernel).sum(dim="player").groupby('time.year').mean('time')
             else:
                 if use_climatology==False:
-                    anoms= var_int.groupby('time.month').mean()-piok_int.groupby('time.month').mean()
+                    anoms= var_wv.groupby('time.month').mean()-piok_wv.groupby('time.month').mean()
                 else:
-                    anoms= var_int.groupby('time.month').mean()-piok_int
-                dRt = (anoms*kernel).sum(dim="level")
+                    anoms= var_wv.groupby('time.month').mean()-piok_wv
+                dRt = (anoms*kernel).sum(dim="player").mean('month')
 
       
         #Save full dRt pattern before global averaging
