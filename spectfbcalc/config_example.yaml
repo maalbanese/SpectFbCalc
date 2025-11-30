@@ -23,8 +23,8 @@ file_paths:
    pressure_data: "" #to specify if you have ps values in a different file and not in an array
    output: "/path/to/output/"
 
-use_climatology: True
-use_ds_climatology: True
+use_climatology: True 
+anomaly_method: "" #specify the anomaly method: monthly, direct, monthly_mean, monthly_direct_mean"
 use_atm_mask: True
 save_pattern: True
 num_year_regr: 10 #number of years to group for regression
