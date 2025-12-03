@@ -1199,7 +1199,10 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     if method in ["climatology", "running_m"]:
         anoms_lr = ta_anom - ts_anom
     else:
-        anoms_lr = ta_anom - ts_anom.groupby("time.month").mean()
+        #if ker=='HUANG':
+        anoms_lr = ta_anom - ts_anom.mean("month")
+        # if ker=='ERA5':    
+        #     anoms_lr = ta_anom - ts_anom.groupby("time.month").mean()
     anoms_unif = ta_anom - anoms_lr
 
     for tip in ['clr', 'cld']:
@@ -2108,12 +2111,13 @@ def calc_fb_interannual_wrapper(config_file: str, ker, variable_mapping_file: st
         
     print("Upload reference climatology...")
     ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
-    
-    fb_coef, fb_cloud, fb_cloud_err, fb_pattern = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, running_years)
-    
-    return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
 
-
+    if save_pattern:
+        fb_coef, fb_cloud, fb_cloud_err, fb_pattern = calc_fb_interannual(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, running_years)
+        return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
+    else:
+        fb_coef, fb_cloud, fb_cloud_err = calc_fb_interannual(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, running_years)
+        return fb_coef, fb_cloud, fb_cloud_err
 
 def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False, running_years=25):   
 
@@ -2188,13 +2192,15 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
                 fb_pattern[(tip, fbn)] = (slope, stderr)
                 slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
-    
 
     #cloud
-    print('cloud feedback calculation...')
+    print('cloud interannual feedback calculation...')
     fb_cloud, fb_cloud_err = feedback_cloud_interannual(ds, piok, fb_coef, temp, time_range, running_years)
-    
-    return fb_coef, fb_cloud, fb_cloud_err, fb_pattern      
+
+    if save_pattern:
+        return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
+    else:
+        return fb_coef, fb_cloud, fb_cloud_err
 
 
 #CLOUD FEEDBACK shell 2008
