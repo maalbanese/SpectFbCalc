@@ -1302,10 +1302,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     if method in ["climatology", "running_m"]:
         anoms_lr = ta_anom - ts_anom
     else:
-        #if ker=='HUANG':
         anoms_lr = ta_anom - ts_anom.mean("month")
-        # if ker=='ERA5':    
-        #     anoms_lr = ta_anom - ts_anom.groupby("time.month").mean()
     anoms_unif = ta_anom - anoms_lr
 
     for tip in ['clr', 'cld']:
@@ -2911,7 +2908,7 @@ def feedback_cloud_interannual(ds, piok, fb_coef, surf_anomaly, time_range=None,
         Estimated standard error of the interannual cloud feedback calculation
         (W/m²/K).
     """
-    
+
     if not (ds['rlut'].dims == ds['rsutcs'].dims):
         raise ValueError("Error: The spatial grids ('lon' and 'lat') datasets must match.")
     
