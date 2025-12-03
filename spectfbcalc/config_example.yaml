@@ -16,18 +16,18 @@ kernels:
 
 file_paths:
    reference_dataset: "/path/to/reference_data/"
-   reference_dataset_pl: "/path/to/reference_data/level_pressure"
+   reference_dataset_pl: "/path/to/reference_data/level_pressure" #to use if vertical data are separate from others
    experiment_dataset: "/path/to/experiment_data/"
    experiment_dataset2: "" #if you need a second experiment dataset, specify it here 
-   experiment_dataset_pl: "/path/to/experiment_data/level_pressure"
+   experiment_dataset_pl: "/path/to/experiment_data/level_pressure" #to use if vertical data are separate from others
    pressure_data: "" #to specify if you have ps values in a different file and not in an array
    output: "/path/to/output/"
 
-use_climatology: True 
-anomaly_method: "" #specify the anomaly method: monthly, direct, monthly_mean, monthly_direct_mean"
+anomaly_method: "" #specify the anomaly method: climatology, running_m, climatology_mean, running_m_mean
 use_atm_mask: True
-save_pattern: True
+save_pattern: False
 num_year_regr: 10 #number of years to group for regression
+num_running_years_trend: 25 #number of years to group for running trend
 time_range: #this is the time range for the reference dataset 
    start: ""
    end: ""
