@@ -39,7 +39,57 @@ def mytestfunction():
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
 def load_spectral_kernel(cart_k: str, cart_out: str):
-    """Loads and preprocesses STE kernels for further analysis."""  
+    """
+    Loads and preprocesses spectral kernels for further analysis.
+
+    This function reads NetCDF files containing spectrally resolved radiative kernels
+    (clear-sky and cloud-sky), selects the relevant frequency range, standardizes
+    variable names and coordinates for consistency with the Xarray data model,
+    and saves a subset of the kernels and metadata as pickle files.
+
+    Parameters:
+    -----------
+    cart_k : str
+        Path to the directory containing the spectral kernel NetCDF files.
+        Files must follow the naming format `spectral_kernel_ste_{tip}.nc`,
+        where `{tip}` is either `'cs'` (clear-sky) or `'cld'` (cloud-sky).
+
+    cart_out : str
+        Path to the directory where the processed kernels and metadata
+        (pressure levels and selected kernel fields) will be saved as pickle
+        files.
+
+    Returns:
+    --------
+    allkers : dict
+        A dictionary containing the processed kernels.  
+        The dictionary keys are tuples of the form `(tip, variable)`, where:
+        - `tip`: Atmospheric condition (`'clr'` for clear-sky, `'cld'` for cloud-sky).
+        - `variable`: Standardized short name for the kernel
+          (e.g., `'t'`, `'ts'`, `'wv_lw'`, `'o3_lw'`, `'ch4_lw'`, `'n2o'`, `'co2_lw'`).
+
+        Each entry contains the kernel field restricted to the frequency
+        range 650–2750 cm⁻¹.
+
+    Saved Files:
+    ------------
+    - **`k_STE.p`**: Kernel corresponding to the temperature perturbation (`'t'`)
+      under cloud-sky conditions.
+    - **`allkers_STE.p`**: Pickle file containing the full `allkers` dictionary.
+    - **`vlevs_ERA5.p`**: Pickle file containing the pressure levels (`player`)
+      extracted from the kernel files.
+
+    Notes:
+    ------
+    - The spectral kernel files must contain variables such as
+      `temp_jac`, `ts_jac`, `wv_jac`, `ozo_jac`, `ch4_jac`,
+      `n2o_jac`, and `co2_jac`.
+    - Variables defined on pressure levels are standardized by renaming
+      the coordinate `lev` to `player`.
+    - The function applies a fixed spectral selection (650–2750 cm⁻¹)
+      corresponding to the typical longwave range of interest.
+    - All kernel datasets are loaded using Xarray and saved using Pickle.
+    """
     
     tips = ['cs','cld']
     vnams = ['temp_jac', 'ts_jac', 'wv_jac', 'ozo_jac','ch4_jac', 'n2o_jac', 'co2_jac']
@@ -263,10 +313,64 @@ def load_kernel_wrapper(ker, config_file: str):
     return allkers
 
 def load_kernel(ker, cart_k, cart_out, finam):
+    """
+    Selects and loads radiative kernels from different sources.
+
+    This function acts as a unified interface for loading and preprocessing
+    radiative kernels from multiple datasets: ERA5, HUANG, and SPECTRAL.
+    It dispatches the loading task to the corresponding specialized routine
+    based on the selected kernel type, and returns the processed kernel
+    dictionary.
+
+    Parameters:
+    -----------
+    ker : str
+        Identifier of the kernel dataset to load.
+        Supported values:
+        - `'ERA5'`     : Loads kernels using `load_kernel_ERA5`.
+        - `'HUANG'`    : Loads kernels using `load_kernel_HUANG`.
+        - `'SPECTRAL'` : Loads spectrally resolved kernels using
+                         `load_spectral_kernel`.
+
+    cart_k : str
+        Path to the directory containing the kernel NetCDF files for the
+        selected dataset.
+
+    cart_out : str
+        Path to the directory where preprocessed kernels, metadata,
+        and auxiliary files will be saved by the underlying loader.
+
+    finam : str
+        Filename pattern used to locate the kernel files. It must include
+        a formatting placeholder (e.g., `'ERA5_kernel_{}_TOA.nc'`,
+        `'spectral_kernel_ste_{}.nc'`) that will be filled with the
+        variable name or kernel type.
+
+    Returns:
+    --------
+    allkers : dict
+        A dictionary containing the preprocessed kernels produced by the
+        selected loader. The structure of the dictionary depends on the
+        kernel dataset:
+        - ERA5     → keys of the form `(tip, variable)`
+        - HUANG    → structure defined in `load_kernel_HUANG`
+        - SPECTRAL → keys of the form `(tip, variable)` with spectral
+                      frequency selection applied
+
+    Notes:
+    ------
+    - This function does not perform preprocessing directly; all variable
+      renaming, frequency selection, and file saving are handled inside
+      the specific loader.
+    - If an unsupported kernel name is provided, the function will fail
+      silently unless additional validation is added.
+    """
     if ker=='ERA5':
          allkers=load_kernel_ERA5(cart_k, cart_out, finam)
     if ker=='HUANG':
          allkers=load_kernel_HUANG(cart_k, cart_out, finam)
+    if ker =='SPECTRAL':
+         allkers = load_spectral_kernel(cart_k, cart_out, finam)
 
     return allkers
 
@@ -839,7 +943,6 @@ def compute_anomalies(var, clim, method="climatology", nonlinear=False, check=Fa
     else:
         raise ValueError(f"Unknown anomaly method {method}")
        
-
 # FUNCTION FOR WV ANOMALIES
 # From Mass mixing Ratio (kg/kg to ppmv)
 def q_to_ppmv(q_inp):
@@ -848,7 +951,7 @@ def q_to_ppmv(q_inp):
     vw_ppmv = q_inp / (1 - q_inp) * (Ma / Mw) * 10**6
     return vw_ppmv
 
-
+############ RADIATIVE ANOMALY FUNCTIONS #############
 #PLANCK SURFACE
 def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
@@ -1199,10 +1302,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     if method in ["climatology", "running_m"]:
         anoms_lr = ta_anom - ts_anom
     else:
-        #if ker=='HUANG':
         anoms_lr = ta_anom - ts_anom.mean("month")
-        # if ker=='ERA5':    
-        #     anoms_lr = ta_anom - ts_anom.groupby("time.month").mean()
     anoms_unif = ta_anom - anoms_lr
 
     for tip in ['clr', 'cld']:
@@ -1716,7 +1816,62 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
 #ALL RAD_ANOM COMPUTATION
 def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
-   
+    High-level wrapper for computing radiative anomaly components using
+    multiple kernel types and flexible configuration settings.
+
+    This function orchestrates the full anomaly-computation workflow:
+    it loads the configuration file, imports the kernel data, reads and
+    standardizes the input dataset, determines which variables and time
+    ranges to use, loads surface pressure if required, computes the
+    reference climatology, and finally calls `calc_anoms` to obtain all
+    anomaly components.
+
+    Parameters
+    ----------
+    config_file : str or dict
+        Path to a YAML configuration file or an already-loaded dict.
+        The configuration must include:
+        - file_paths (input/output directories)
+        - anomaly_method
+        - time_range / time_range_exp (optional)
+        - pressure_data (for HUANG kernels)
+        - use_atm_mask, save_pattern (optional)
+
+    ker : str
+        Kernel type to use (`'ERA5'`, `'HUANG'`, `'SPECTRAL'`).
+        Determines which kernel loader is invoked.
+
+    variable_mapping_file : str
+        YAML file defining variable name mappings and computed variables,
+        used to standardize datasets through `standardize_names`.
+
+    Returns
+    -------
+    (anom_ps, anom_pal, anom_a, anom_wv) : tuple of xr.Dataset
+        The four major radiative anomaly components:
+        - Surface Planck anomaly
+        - Atmospheric Planck anomaly
+        - Albedo anomaly
+        - Water vapor anomaly
+
+    Workflow
+    --------
+    1. Load configuration settings.
+    2. Load kernels using `load_kernel_wrapper`.
+    3. Read and standardize the dataset via `read_data`.
+    4. Determine which variables and time ranges to use.
+    5. Load surface pressure if required by the kernel type.
+    6. Load reference climatology fields with `ref_clim`.
+    7. Compute anomalies via `calc_anoms`.
+
+    Notes
+    -----
+    - The function checks whether climatology and experiment time ranges
+      are provided and handles missing values gracefully.
+    - Surface pressure is only required for HUANG kernels; other kernel
+      families ignore this argument.
+    - This wrapper is the main user-facing entry point for computing
+      anomaly components in the workflow.
     """
     if isinstance(config_file, str):
         with open(config_file, 'r') as file:
@@ -1787,7 +1942,86 @@ def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
 
 def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False):
     """
-    
+    Computes radiative anomalies for multiple feedback components using
+    precomputed kernels.
+
+    This function evaluates the radiative anomaly associated with several
+    radiative feedback components—surface Planck response, atmospheric
+    Planck response, albedo, and water vapor—by applying the selected
+    kernels to the input dataset. Each component is computed only if a
+    preprocessed NetCDF file is not already present; otherwise the function
+    loads the saved results to avoid redundant computation.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset containing the model or observational fields needed
+        to compute anomalies.
+
+    piok_rad : xr.Dataset
+        Reference climatology against which anomalies are computed.
+
+    ker : str
+        Identifier of the kernel type being used 
+        (e.g., `'ERA5'`, `'HUANG'`, `'SPECTRAL'`).
+
+    allkers : dict
+        Dictionary containing the kernels previously processed by a
+        kernel-loading function (e.g., `load_kernel_ERA5`).
+
+    cart_out : str
+        Output directory where anomaly components will be saved as
+        NetCDF files when first computed.
+
+    surf_pressure : xr.Dataset or None
+        Surface pressure dataset, required for certain kernel types (e.g. HUANG).
+        If not needed for the kernel type, can be left as `None`.
+
+    time_range : dict or None, optional
+        Time range to apply when computing anomalies (e.g. 
+        `{'start': '2000', 'end': '2010'}`).  
+        If `None`, the full dataset time range is used.
+
+    method : str, optional
+        Method used to compute anomalies (e.g., `'climatology'`, `'running_m'`,
+        `'climatology_mean'`, etc.).  
+        This determines the output filename suffix.
+
+    config_file : str or dict, optional
+        Path to a configuration YAML file or the already-loaded config dict.
+        Passed to subfunctions when additional settings are required.
+
+    use_atm_mask : bool, optional
+        If `True`, masks regions not used for atmospheric anomaly computation.
+
+    save_pattern : bool, optional
+        If `True`, also saves spatial anomaly patterns (not just global means).
+
+    Returns
+    -------
+    anom_ps : xr.Dataset
+        Radiative anomaly from the surface Planck response.
+
+    anom_pal : xr.Dataset
+        Radiative anomaly from the atmospheric Planck response.
+
+    anom_a : xr.Dataset
+        Radiative anomaly from surface albedo changes.
+
+    anom_wv : xr.Dataset
+        Radiative anomaly from water vapor changes.
+
+    Notes
+    -----
+    - The function avoids recomputation by checking whether output files
+      already exist in `cart_out`.
+    - The actual computation is delegated to the respective functions:
+        - `Rad_anomaly_planck_surf`
+      	- `Rad_anomaly_planck_atm_lr`
+      	- `Rad_anomaly_albedo`
+      	- `Rad_anomaly_wv`
+    - Output files follow the naming pattern:
+          dRt_<component>_global_clr_<method>-<ker>kernels.nc
     """
     # define suffix for saved files based on method only
     suffix = f"_{method}"
@@ -1827,21 +2061,47 @@ def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
     Wrapper function to compute radiative and cloud feedbacks based on the provided configuration file and kernel type.
     
-    This function loads the necessary data and kernels from the configuration file, processes the datasets, and 
-    computes the feedback coefficients for both radiative anomalies and cloud feedbacks. It takes into account time 
-    ranges for climatology and experimental data, as well as surface pressure if required by the kernel type.
-    
-    Parameters:
-    - config_file (str): Path to the configuration YAML file containing the model settings and file paths.
-    - ker (str): Kernel type (e.g., 'HUANG') that determines if surface pressure is required for the analysis.
-    -  variable_mapping_file : str
-        Path to the YAML file with standardization rules for variables.
-    
-    Returns:
-    - fb_coef (dict): Dictionary containing feedback coefficients for radiative anomalies.
-    - fb_cloud (xarray.DataArray): Cloud feedback data array.
-    - fb_cloud_err (xarray.DataArray): Cloud feedback error data array.
-   
+    This function orchestrates the full workflow for calculating climate
+    feedbacks based on a configuration file. It loads kernels, climate datasets,
+    reference climatology, and surface pressure (if required), then calls
+    `calc_fb` to compute radiative and cloud feedbacks. Optional spatial
+    feedback patterns can also be saved.
+
+    Parameters
+    ----------
+    config_file : str or dict
+        Path to a YAML configuration file or an already-loaded configuration
+        dictionary. Must include:
+        - file_paths (input/output directories)
+        - anomaly_method
+        - time_range / time_range_exp (optional)
+        - pressure_data (required for HUANG kernels)
+        - use_atm_mask, save_pattern (optional)
+
+    ker : str
+        Kernel type to use (`'ERA5'`, `'HUANG'`, `'SPECTRAL'`). Determines
+        which kernel loader is invoked and whether surface pressure is required.
+
+    variable_mapping_file : str
+        Path to a YAML file defining variable name mappings and computed
+        variables, used to standardize datasets via `standardize_names`.
+
+    Returns
+    -------
+    fb_coef : dict
+        Dictionary of radiative feedback coefficients for each component
+        and atmospheric condition.
+
+    fb_cloud : xarray.DataArray
+        Cloud feedback data array computed from global mean regressions.
+
+    fb_cloud_err : xarray.DataArray
+        Error associated with the cloud feedback calculation.
+
+    fb_pattern : dict, optional
+        Dictionary of spatial feedback patterns and standard errors for each
+        component and atmospheric condition. Returned only if `save_pattern=True`.
+
     """
     if isinstance(config_file, str):
         with open(config_file, 'r') as file:
@@ -1916,33 +2176,79 @@ def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
     
 def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False, num=10):
     """
-    Compute the radiative feedback and cloud feedback based on the provided datasets and kernels.
-    
-    This function calculates the radiative feedbacks by processing the Planck surface, Planck atmospheric, 
-    albedo, and water vapor anomalies. It also computes cloud feedbacks by applying linear regression to global 
-    mean temperature anomalies and feedbacks. The function handles both climatology-based and 21-year mean data, 
-    depending on the `use_climatology` flag. It also considers the specified time range for the analysis.
-    
-    Parameters:
-    - ds (xarray.Dataset): The dataset containing climate model outputs.
-    - piok_rad (xarray.Dataset): The reference climatology dataset for radiative anomalies.
-    - piok_cloud (xarray.Dataset): The reference climatology dataset for cloud feedbacks.
-    - ker (str): Kernel type (e.g., 'HUANG') that determines specific feedback calculations.
-    - allkers (dict): Dictionary of kernel data arrays for different feedback types.
-    - cart_out (str): Path to the output directory where the feedback results are stored.
-    - surf_pressure (xarray.Dataset or None): The surface pressure dataset (if required by the kernel type).
-    - method : {"climatology", "running_m", "climatology_mean", "running_m_mean"}, default "climatology"
-         Method for anomaly computation:
-         - "climatology"            : monthly averaged climatology to calculate the anomaly
-         - "running_m"              : 21-years running mean climatology to calculate the anomaly 
-         - "climatology_mean"       : anomaly is computed as a single averaged value over the time dimension
-         - "running_m_mean"         : anomaly is computed as a single averaged value over the time dimension
-    - time_range (tuple, optional): The time range to be used for the analysis (default is None).
-    
-    Returns:
-    - fb_coef (dict): Dictionary containing feedback coefficients for different feedback types.
-    - fb_cloud (xarray.DataArray): Cloud feedback data array.
-    - fb_cloud_err (xarray.DataArray): Cloud feedback error data array.
+    Compute radiative and cloud feedbacks using preprocessed kernels.
+
+    This function calculates feedbacks from multiple radiative components:
+    - Planck surface
+    - Planck atmospheric
+    - Albedo
+    - Water vapor
+
+    It also computes cloud feedbacks by performing linear regression between
+    global mean temperature anomalies and radiative anomalies. Optionally,
+    spatial feedback patterns can be computed and saved.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing climate model output variables.
+
+    piok : xarray.Dataset
+        Reference climatology dataset used for computing radiative anomalies.
+
+    ker : str
+        Kernel type (e.g., `'HUANG'`) that determines specific calculations.
+
+    allkers : dict
+        Dictionary of kernels for the different radiative feedback components.
+
+    cart_out : str
+        Output directory where computed feedbacks and patterns are saved.
+
+    surf_pressure : xarray.Dataset or None
+        Surface pressure dataset, required for certain kernel types.
+
+    time_range : dict or None, optional
+        Time range used for computing anomalies, e.g.,
+        `{'start': '2000', 'end': '2010'}`. If `None`, full dataset range
+        is used.
+
+    method : str, optional
+        Method used for anomaly computation. Options include:
+        - `"climatology"`: monthly averaged climatology
+        - `"running_m"`: 21-year running mean
+        - `"climatology_mean"`: time-averaged anomaly
+        - `"running_m_mean"`: running mean anomaly
+
+    config_file : str or dict, optional
+        Configuration settings passed to subfunctions if needed.
+
+    use_atm_mask : bool, optional
+        If `True`, masks regions not used in atmospheric anomaly calculations.
+
+    save_pattern : bool, optional
+        If `True`, computes and saves spatial feedback patterns and
+        standard errors.
+
+    num : int, optional
+        Number of years per regression block when grouping anomalies for
+        decadal averaging (default 10).
+
+    Returns
+    -------
+    fb_coef : dict
+        Radiative feedback coefficients for each component and condition
+        (`'clr'` or `'cld'`).
+
+    fb_cloud : xarray.DataArray
+        Cloud feedback data array derived from global mean regressions.
+
+    fb_cloud_err : xarray.DataArray
+        Error associated with the cloud feedback calculation.
+
+    fb_pattern : dict or None
+        Dictionary of spatial feedback slopes and standard errors for each
+        component and condition. Only returned if `save_pattern=True`.
     """
 
     if 'tas' not in piok:
@@ -2029,22 +2335,51 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, me
 
 def calc_fb_interannual_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
-    Wrapper function to compute radiative and cloud feedbacks based on the provided configuration file and kernel type.
-    
-    This function loads the necessary data and kernels from the configuration file, processes the datasets, and 
-    computes the feedback coefficients for both radiative anomalies and cloud feedbacks. It takes into account time 
-    ranges for climatology and experimental data, as well as surface pressure if required by the kernel type.
-    
-    Parameters:
-    - config_file (str): Path to the configuration YAML file containing the model settings and file paths.
-    - ker (str): Kernel type (e.g., 'HUANG') that determines if surface pressure is required for the analysis.
-    -  variable_mapping_file : str
-        Path to the YAML file with standardization rules for variables.
-    
-    Returns:
-    - fb_coef (dict): Dictionary containing feedback coefficients for radiative anomalies.
-    - fb_cloud (xarray.DataArray): Cloud feedback data array.
-    - fb_cloud_err (xarray.DataArray): Cloud feedback error data array.
+    Wrapper function for computing interannual radiative and cloud feedbacks.
+
+    This function manages the full workflow for interannual feedback calculation,
+    using a running-mean approach to remove decadal trends from global mean
+    temperature and radiative anomalies. It loads kernels, climate datasets,
+    reference climatology, and surface pressure (if required), then calls
+    `calc_fb_interannual` to compute the feedbacks. Optionally, spatial feedback
+    patterns can also be saved.
+
+    Parameters
+    ----------
+    config_file : str or dict
+        Path to a YAML configuration file or a preloaded configuration dictionary.
+        Must include:
+        - file_paths (input/output directories)
+        - anomaly_method
+        - time_range / time_range_exp (optional)
+        - pressure_data (required for HUANG kernels)
+        - use_atm_mask, save_pattern (optional)
+        - num_running_years_trend (number of years for running mean)
+
+    ker : str
+        Kernel type to use (`'ERA5'`, `'HUANG'`, `'SPECTRAL'`). Determines
+        which kernel loader is invoked and whether surface pressure is required.
+
+    variable_mapping_file : str
+        Path to a YAML file defining variable name mappings and computed
+        variables, used to standardize datasets via `standardize_names`.
+
+    Returns
+    -------
+    fb_coef : dict
+        Dictionary of interannual radiative feedback coefficients for each
+        component and atmospheric condition.
+
+    fb_cloud : xarray.DataArray
+        Cloud feedback data array computed using interannual variations.
+
+    fb_cloud_err : xarray.DataArray
+        Error associated with the interannual cloud feedback calculation.
+
+    fb_pattern : dict, optional
+        Dictionary of spatial interannual feedback slopes and standard errors
+        for each component and atmospheric condition. Returned only if
+        `save_pattern=True`.
    
     """
     if isinstance(config_file, str):
@@ -2120,6 +2455,90 @@ def calc_fb_interannual_wrapper(config_file: str, ker, variable_mapping_file: st
         return fb_coef, fb_cloud, fb_cloud_err
 
 def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False, running_years=25):   
+    """
+    Compute interannual radiative and cloud feedbacks using a running-mean approach.
+
+    This function calculates feedbacks from multiple radiative components:
+    - Planck surface
+    - Planck atmospheric
+    - Albedo
+    - Water vapor
+
+    Unlike the standard feedback calculation, this function removes long-term
+    trends using a running mean over `running_years` to isolate interannual
+    variability. Cloud feedbacks are computed via linear regression between
+    detrended global mean temperature anomalies and radiative anomalies. Spatial
+    feedback patterns can also be computed and saved if requested.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing climate model output variables.
+
+    piok : xarray.Dataset
+        Reference climatology dataset used for computing radiative anomalies.
+
+    ker : str
+        Kernel type (e.g., `'HUANG'`) that determines specific calculations.
+
+    allkers : dict
+        Dictionary of kernels for the different radiative feedback components.
+
+    cart_out : str
+        Output directory where computed feedbacks and patterns are saved.
+
+    surf_pressure : xarray.Dataset or None
+        Surface pressure dataset, required for certain kernel types.
+
+    time_range : dict or None, optional
+        Time range used for computing anomalies, e.g.,
+        `{'start': '2000', 'end': '2010'}`. If `None`, full dataset range
+        is used.
+
+    method : str, optional
+        Method used for anomaly computation. Options include:
+        - `"climatology"`: monthly averaged climatology
+        - `"running_m"`: 21-year running mean
+        - `"climatology_mean"`: time-averaged anomaly
+        - `"running_m_mean"`: running mean anomaly
+
+    config_file : str or dict, optional
+        Configuration settings passed to subfunctions if needed.
+
+    use_atm_mask : bool, optional
+        If `True`, masks regions not used in atmospheric anomaly calculations.
+
+    save_pattern : bool, optional
+        If `True`, computes and saves spatial feedback patterns and
+        standard errors.
+
+    running_years : int, optional
+        Number of years for the running mean used to remove trends
+        (default is 25).
+
+    Returns
+    -------
+    fb_coef : dict
+        Interannual radiative feedback coefficients for each component and
+        condition (`'clr'` or `'cld'`).
+
+    fb_cloud : xarray.DataArray
+        Cloud feedback data array derived from interannual regressions.
+
+    fb_cloud_err : xarray.DataArray
+        Error associated with the interannual cloud feedback calculation.
+
+    fb_pattern : dict or None
+        Dictionary of spatial feedback slopes and standard errors for each
+        component and condition. Only returned if `save_pattern=True`.
+    Notes
+    -----
+    - Removes long-term trends via a running mean before computing feedbacks.
+    - Performs linear regression between detrended global mean temperature
+      anomalies and radiative anomalies for each component.
+    - Handles optional spatial feedback calculation.
+    - Useful for analyzing interannual variability in climate feedbacks.
+    """
 
     if 'tas' not in piok:
         raise ValueError("Reference climatology for 'tas' is missing in piok. Ensure 'tas' is included in 'allvars' when calling ref_clim.")
@@ -2205,6 +2624,46 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
 
 #CLOUD FEEDBACK shell 2008
 def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
+    """
+    Wrapper function to compute cloud radiative feedbacks using a climate dataset.
+
+    This function loads kernels, climate model outputs, and reference climatology
+    from the configuration file. It computes radiative feedback coefficients using
+    `calc_fb` and then calculates the cloud radiative feedback by performing
+    regressions between global mean temperature anomalies and cloud-related
+    radiative fluxes. Surface pressure is optionally used for specific kernels
+    (e.g., HUANG).
+
+    Parameters
+    ----------
+    config_file : str or dict
+        Path to a YAML configuration file or a preloaded configuration dictionary.
+        Must include:
+        - file_paths (input/output directories)
+        - anomaly_method
+        - time_range / time_range_exp (optional)
+        - pressure_data (required for HUANG kernels)
+        - use_atm_mask, save_pattern (optional)
+        - num_year_regr (years to aggregate in regression)
+
+    ker : str
+        Kernel type to use (`'ERA5'`, `'HUANG'`, `'SPECTRAL'`), determining
+        which kernel loader is invoked and whether surface pressure is required.
+
+    variable_mapping_file : str
+        Path to a YAML file defining variable name mappings and computed
+        variables, used to standardize datasets via `standardize_names`.
+
+    Returns
+    -------
+    fb_cloud : xarray.DataArray
+        Cloud radiative feedback data array computed from regressions against
+        global mean temperature anomalies.
+
+    fb_cloud_err : xarray.DataArray
+        Estimated error associated with the cloud feedback calculation.
+
+    """
 
     if isinstance(config_file, str):
         with open(config_file, 'r') as file:
@@ -2297,21 +2756,54 @@ def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
 def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
    #questo va testato perchè non sono sicura che funzionino le cose con pimean (calcolato con climatology ha il groupby.month di cui qui non si tiene conto)
     """
-    Computes cloud radiative feedback anomalies using climate model data.
+    Compute cloud radiative feedback strength and associated error.
 
-    Parameters:
-    - ds (xarray.Dataset): Input dataset containing outgoing longwave radiation (rlut), reflected shortwave radiation (rsut), clear-sky outgoing longwave (rlutcs) and shortwave (rsutcs) radiation.
-    - pimean (dict): Dictionary of pre-industrial mean values for radiative fluxes.
-    - fb_coef (dict): Dictionary containing radiative feedback coefficients for different feedback mechanisms.
-    - surf_anomaly (xarray.DataArray): Surface temperature anomaly data used for regression, which should be pre-processed as follows:  
-      `gtas = ctl.global_mean(tas_anomaly).groupby('time.year').mean('time')`  
-      `gtas = gtas.groupby((gtas.year-1) // 10 * 10).mean()`
-    - time_range (tuple of str, optional): Time range for selecting data (format: ('YYYY-MM-DD', 'YYYY-MM-DD')).
+    This function calculates cloud feedback as the difference between net
+    radiative flux anomalies under all-sky and clear-sky conditions. It
+    performs linear regression between global mean surface temperature anomalies
+    and radiative fluxes to obtain the cloud feedback slope and its uncertainty.
+    Radiative anomalies are regridded to a common spatial grid and optionally
+    restricted to a specific time range.
 
-    Returns:
-    - tuple: 
-        - fb_cloud (float): Cloud radiative feedback strength.
-        - fb_cloud_err (float): Estimated error in the cloud radiative feedback calculation.
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing radiative flux variables:
+        - 'rlut' : Outgoing longwave radiation at top of atmosphere (all-sky)
+        - 'rsut' : Reflected shortwave radiation (all-sky)
+        - 'rlutcs' : Outgoing longwave radiation (clear-sky)
+        - 'rsutcs' : Reflected shortwave radiation (clear-sky)
+
+    piok : xarray.Dataset
+        Reference climatology used to compute radiative anomalies.
+
+    fb_coef : dict
+        Dictionary of radiative feedback coefficients for non-cloud components
+        (Planck, albedo, water vapor, lapse rate).
+
+    surf_anomaly : xarray.DataArray
+        Global mean surface temperature anomalies used for regression.
+        Expected to be pre-processed as:
+        ```
+        gtas = ctl.global_mean(tas_anomaly).groupby('time.year').mean('time')
+        gtas = gtas.groupby((gtas.year-1)//10*10).mean()
+        ```
+
+    time_range : dict, optional
+        Time range for selecting data from `ds`, e.g.,
+        `{'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD'}`. Default is None
+        (full time range is used).
+
+    num : int, optional
+        Number of years to aggregate in regressions (default is 10).
+
+    Returns
+    -------
+    fb_cloud : float
+        Cloud radiative feedback strength (W/m²/K).
+
+    fb_cloud_err : float
+        Estimated standard error of the cloud feedback calculation (W/m²/K).
     """
     if not (ds['rlut'].dims == ds['rsutcs'].dims):
         raise ValueError("Error: The spatial grids ('lon' and 'lat') datasets must match.")
@@ -2367,9 +2859,56 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
     
     return fb_cloud, fb_cloud_err
 
-
 def feedback_cloud_interannual(ds, piok, fb_coef, surf_anomaly, time_range=None, running_years=25):
-    
+    """
+    Compute interannual cloud radiative feedback and associated error.
+
+    This function calculates cloud feedback on interannual timescales by first
+    removing multi-year running mean trends from radiative fluxes and temperature
+    anomalies. It performs linear regression between detrended global mean
+    surface temperature anomalies and detrended cloud radiative fluxes
+    (difference between all-sky and clear-sky net radiation) to estimate the
+    cloud feedback slope and its uncertainty.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing radiative flux variables:
+        - 'rlut' : Outgoing longwave radiation at top of atmosphere (all-sky)
+        - 'rsut' : Reflected shortwave radiation (all-sky)
+        - 'rlutcs' : Outgoing longwave radiation (clear-sky)
+        - 'rsutcs' : Reflected shortwave radiation (clear-sky)
+
+    piok : xarray.Dataset
+        Reference climatology dataset used for baseline radiative fluxes.
+
+    fb_coef : dict
+        Dictionary of radiative feedback coefficients for non-cloud components
+        (Planck, albedo, water vapor, lapse rate) used in the cloud feedback
+        calculation.
+
+    surf_anomaly : xarray.DataArray
+        Global mean surface temperature anomalies (detrended) used for regression.
+
+    time_range : dict, optional
+        Time range for selecting data from `ds`, e.g.,
+        `{'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD'}`. Default is None
+        (full time range is used).
+
+    running_years : int, optional
+        Number of years to apply running mean for detrending interannual
+        variations (default is 25 years).
+
+    Returns
+    -------
+    fb_cloud : float
+        Interannual cloud radiative feedback strength (W/m²/K).
+
+    fb_cloud_err : float
+        Estimated standard error of the interannual cloud feedback calculation
+        (W/m²/K).
+    """
+
     if not (ds['rlut'].dims == ds['rsutcs'].dims):
         raise ValueError("Error: The spatial grids ('lon' and 'lat') datasets must match.")
     
