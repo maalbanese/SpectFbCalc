@@ -92,9 +92,8 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
     """
     
     tips = ['cs','cld']
-    vnams = ['temp_jac', 'ts_jac', 'wv_jac', 'ozo_jac','ch4_jac', 'n2o_jac', 'co2_jac']
-    finam = 'spectral_kernel_ste_{}.nc'
-    
+    vnams = ['temp_jac', 'ts_jac', 'wv_jac']
+
     allkers = dict()
     
     for tip in tips:
@@ -112,30 +111,19 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
             if vna_local =='wv_jac':
                 kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
                 vna = 'wv_lw'
-            if vna_local =='ozo_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'o3_lw'
-            if vna_local =='ch4_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'ch4_lw'
-            if vna_local =='n2o_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'n2o'
-            if vna_local =='co2_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'co2_lw'
-            if tip == 'cs' or 'forum_cs':
-                tip = 'clr'
-            
-            allkers[(tip, vna)] = kernels[vna_local].sel(freq=slice(650,2750)) #frequency selection 650-2750 cm-1 
+
+            if tip =='cs':
+                allkers[('clr', vna)] = kernels[vna_local]
+            else:
+                allkers[(tip, vna)] = kernels[vna_local] #frequency selection 110-2750 cm-1 
             
             #Save all kernels, t kernel and pressure levels to an external file
-            k = allkers[('cld', 't')]
             vlevs = xr.load_dataset( cart_k + finam.format(tip),chunks={'time':12})['lev']
             vlevs = vlevs.rename({'lev': 'player'})
-            pickle.dump(k, open(cart_out + 'k_STE.p', 'wb'))
-            pickle.dump(allkers, open(cart_out + 'allkers_STE.p', 'wb'))
-            pickle.dump(vlevs, open(cart_out + 'vlevs_ERA5.p', 'wb')) #save vlevs
+            pickle.dump(allkers, open(cart_out + 'allkers_SPECTRAL.p', 'wb'))
+            pickle.dump(vlevs, open(cart_out + 'vlevs_SPECTRAL.p', 'wb')) #save vlevs
+            cose = 100*vlevs.player
+            pickle.dump(cose, open(cart_out + 'cose_SPECTRAL.p', 'wb'))
     
     return allkers
 
@@ -307,6 +295,11 @@ def load_kernel_wrapper(ker, config_file: str):
        cart_out = config['kernels']['huang']['path_output']
        finam = config['kernels']['huang']['filename_template']
     
+    if ker=='SPECTRAL':
+       #da modificare
+       cart_k = config['kernels']['spect']['path_input']
+       cart_out = config['kernels']['spect']['path_output']
+       finam = config['kernels']['spect']['filename_template']    
      
     allkers = load_kernel(ker, cart_k, cart_out, finam)
 
@@ -371,7 +364,6 @@ def load_kernel(ker, cart_k, cart_out, finam):
          allkers=load_kernel_HUANG(cart_k, cart_out, finam)
     if ker =='SPECTRAL':
          allkers = load_spectral_kernel(cart_k, cart_out, finam)
-
     return allkers
 
 ###### LOAD AND CHECK DATA
@@ -1344,7 +1336,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         else:
             dRt_unif = dRt_unif.mean("month")
             dRt_lr = dRt_lr.mean("month")
-
+        
         #Save full dRt pattern before global averaging
         if save_pattern:
             dRt_unif.name = "dRt_atmo"
@@ -1770,8 +1762,7 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
             if method in ["climatology", "running_m"]:
                 dRt = (coso.groupby('time.month')*( kernel* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')
                 dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')
-                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')
-            
+                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')            
             else:
                 dRt = (coso*( kernel* vlevs.dp / 100)).sum('player').mean('month')
                 dRt_lw = (coso*( kernel_lw* vlevs.dp / 100)).sum('player').mean('month')
@@ -1782,7 +1773,7 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
                 dRt= (anoms.groupby('time.month')*kernel).sum(dim="player").groupby('time.year').mean('time')
             else:
                 dRt = (anoms*kernel).sum(dim="player").mean('month')
-
+                
         #Save full dRt pattern before global averaging
         if save_pattern:
             dRt.name = "dRt"
@@ -2620,7 +2611,7 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
         return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
     else:
         return fb_coef, fb_cloud, fb_cloud_err
-
+    
 
 #CLOUD FEEDBACK shell 2008
 def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
