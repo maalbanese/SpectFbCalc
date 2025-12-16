@@ -2802,14 +2802,15 @@ def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     
     if time_range is not None:
-        nomi='rlut rsut rlutcs rsutcs'.split()
-        for nom in nomi:
-            ds[nom] = ds[nom].sel(time=slice(time_range['start'], time_range['end']))
-
-    rlut=ds['rlut']
-    rsut=ds['rsut']
-    rsutcs = ds['rsutcs']
-    rlutcs = ds['rlutcs']
+        rlut=ds['rlut'].sel(time=slice(time_range['start'], time_range['end']))
+        rsut=ds['rsut'].sel(time=slice(time_range['start'], time_range['end']))
+        rsutcs = ds['rsutcs'].sel(time=slice(time_range['start'], time_range['end']))
+        rlutcs = ds['rlutcs'].sel(time=slice(time_range['start'], time_range['end']))
+    else:
+        rlut=ds['rlut']
+        rsut=ds['rsut']
+        rsutcs = ds['rsutcs']
+        rlutcs = ds['rlutcs']
 
     N = - rlut - rsut
     N0 = - rsutcs - rlutcs
