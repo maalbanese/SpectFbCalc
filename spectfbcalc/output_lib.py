@@ -21,22 +21,33 @@ def save_feedback_output(output, out_path_txt, out_path_nc=None):
 
     Parameters
     ----------
-    output : tuple
-        Tuple containing:
-        (fb_coeffs, fb_cloud, fb_cloud_err, fb_pattern, fb_cloud_pattern).
+    output : dict
+    Dictionary containing feedback regression results with the following keys:
+        - "fb_coeffs": dict
+            Radiative feedback coefficients and errors for clear-sky and all-sky components.
+            Keys are tuples of the form (sky_type, component), e.g. ('cld', 'planck-surf').
+
+        - "fb_cloud": float or None
+            Global mean cloud radiative feedback coefficient.
+
+        - "fb_cloud_err": float or None
+            Estimated uncertainty of the cloud radiative feedback.
+
+        - "fb_pattern": dict or None
+            Spatial patterns of feedback slopes and errors.
+            Keys are tuples (sky_type, component), values are (slope, stderr) DataArrays.
     out_path_txt : str
         Path to the output .txt file (always required).
     out_path_nc : str, optional
         Path to the output .nc file. Required if feedback patterns are included.
     """
-    if not isinstance(output, tuple) or len(output) < 3:
-        raise ValueError("Expected output to be a tuple with at least 3 elements.")
+    if not isinstance(output, dict):
+        raise ValueError("Expected output to be a dict with keys: fb_coeffs, fb_cloud, fb_cloud_err, fb_pattern")
 
-    fb_coeffs = output[0]
-    fb_cloud = output[1]
-    fb_cloud_err = output[2]
-    fb_pattern = output[3] if len(output) > 3 else None
-    fb_cloud_pattern = output[4] if len(output) > 4 else None
+    fb_coeffs = output.get("fb_coeffs")
+    fb_cloud = output.get("fb_cloud")
+    fb_cloud_err = output.get("fb_cloud_err")
+    fb_pattern = output.get("fb_pattern")
 
     # ---------- TXT output ----------
     if out_path_txt:
@@ -49,15 +60,17 @@ def save_feedback_output(output, out_path_txt, out_path_nc=None):
                         f.write(f"{key.replace('_', '-') + ' feedback'}: {result.slope:.4f}\n")
                         f.write(f"{key.replace('_', '-') + ' feedback error'}: {result.stderr:.4f}\n")
 
-            write_block("cld", fb_coeffs)
-            write_block("clr", fb_coeffs)
-            f.write(f"cloud feedback: {fb_cloud:.4f}\n")
-            f.write(f"cloud feedback error: {fb_cloud_err:.4f}\n")
+            if fb_coeffs is not None:
+                write_block("cld", fb_coeffs)
+                write_block("clr", fb_coeffs)
+            if fb_cloud is not None and fb_cloud_err is not None:
+                f.write(f"cloud feedback: {fb_cloud:.4f}\n")
+                f.write(f"cloud feedback error: {fb_cloud_err:.4f}\n")
 
     print(f"Saved feedback coefficients to {out_path_txt}")
 
     # ---------- NetCDF output ----------
-    if out_path_nc and (fb_pattern or fb_cloud_pattern):
+    if out_path_nc and fb_pattern is not None:
         # Dummy lat/lon if not available in pattern
         lat = np.linspace(-90, 90, 73)
         lon = np.linspace(0, 360, 144, endpoint=False)
@@ -69,25 +82,6 @@ def save_feedback_output(output, out_path_txt, out_path_nc=None):
             for (cloud_type, component), (slope, stderr) in fb_pattern.items():
                 key_slope = f"{cloud_type}_{component}_slope"
                 key_stderr = f"{cloud_type}_{component}_stderr"
-                safe_key_slope = key_slope.replace("(", "").replace(")", "").replace(",", "").replace("'", "").replace(" ", "_")
-                data_vars[safe_key_slope] = (["lat", "lon"], slope.data if hasattr(slope, "data") else slope)
-                safe_key_stderr = key_stderr.replace("(", "").replace(")", "").replace(",", "").replace("'", "").replace(" ", "_")
-                data_vars[safe_key_stderr] = (["lat", "lon"], stderr.data if hasattr(stderr, "data") else stderr)
-
-        # Add cloud feedback spatial pattern
-        if fb_cloud_pattern:
-            for key, (slope, stderr) in fb_cloud_pattern.items():
-                # If key is a tuple, process normally
-                if isinstance(key, tuple):
-                    cloud_type, comp = key
-                    if comp == "cloud":
-                        new_key = f"{cloud_type}_cloud"
-                    else:
-                        new_key = f"{cloud_type}_{comp}"
-                else:
-                    new_key = key
-                key_slope = f"{new_key}_slope"
-                key_stderr = f"{new_key}_stderr"
                 safe_key_slope = key_slope.replace("(", "").replace(")", "").replace(",", "").replace("'", "").replace(" ", "_")
                 data_vars[safe_key_slope] = (["lat", "lon"], slope.data if hasattr(slope, "data") else slope)
                 safe_key_stderr = key_stderr.replace("(", "").replace(")", "").replace(",", "").replace("'", "").replace(" ", "_")
