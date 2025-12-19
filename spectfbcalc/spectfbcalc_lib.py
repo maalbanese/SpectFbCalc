@@ -2157,13 +2157,12 @@ def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
         
     print("Upload reference climatology...")
     ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
-    
-    if save_pattern:
-        fb_coef, fb_cloud, fb_cloud_err, fb_pattern = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, num)
-        return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
-    else:
-        fb_coef, fb_cloud, fb_cloud_err = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, num)
-        return fb_coef, fb_cloud, fb_cloud_err
+
+    outputs = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure,
+                    time_range_exp, method, config_file, use_atm_mask, save_pattern, num)
+
+    return outputs
+        
     
 def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False, num=10):
     """
@@ -2316,13 +2315,22 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, me
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
     
     #cloud
-    print('cloud feedback calculation...')
-    fb_cloud, fb_cloud_err = feedback_cloud(ds, piok, fb_coef, gtas, time_range, num)
-    
-    if save_pattern:
-        return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
+    required_cloud_vars = {"rlut", "rsut", "rlutcs", "rsutcs"}
+    can_compute_cloud = required_cloud_vars.issubset(set(ds.variables))
+    if can_compute_cloud:
+        print('cloud feedback calculation...')
+        fb_cloud, fb_cloud_err = feedback_cloud(ds, piok, fb_coef, gtas, time_range, num)
     else:
-        return fb_coef, fb_cloud, fb_cloud_err
+        print("Cloud variables not found → skipping cloud feedback.")
+        fb_cloud = None
+        fb_cloud_err = None
+    
+    return {
+        "fb_coeffs": fb_coef,
+        "fb_cloud": fb_cloud,
+        "fb_cloud_err": fb_cloud_err,
+        "fb_pattern": fb_pattern if save_pattern else None,
+    }
 
 def calc_fb_interannual_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
@@ -2438,12 +2446,10 @@ def calc_fb_interannual_wrapper(config_file: str, ker, variable_mapping_file: st
     print("Upload reference climatology...")
     ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
 
-    if save_pattern:
-        fb_coef, fb_cloud, fb_cloud_err, fb_pattern = calc_fb_interannual(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, running_years)
-        return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
-    else:
-        fb_coef, fb_cloud, fb_cloud_err = calc_fb_interannual(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, running_years)
-        return fb_coef, fb_cloud, fb_cloud_err
+    outputs = calc_fb_interannual(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, running_years)
+
+    return outputs
+
 
 def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False, running_years=25):   
     """
@@ -2604,146 +2610,25 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
 
     #cloud
-    print('cloud interannual feedback calculation...')
-    fb_cloud, fb_cloud_err = feedback_cloud_interannual(ds, piok, fb_coef, temp, time_range, running_years)
-
-    if save_pattern:
-        return fb_coef, fb_cloud, fb_cloud_err, fb_pattern
+    required_cloud_vars = {"rlut", "rsut", "rlutcs", "rsutcs"}
+    can_compute_cloud = required_cloud_vars.issubset(set(ds.variables))
+    if can_compute_cloud:
+        print('cloud interannual feedback calculation...')
+        fb_cloud, fb_cloud_err = feedback_cloud_interannual(ds, piok, fb_coef, temp, time_range, running_years)
     else:
-        return fb_coef, fb_cloud, fb_cloud_err
+        print("Cloud variables not found → skipping cloud feedback.")
+        fb_cloud = None
+        fb_cloud_err = None
+    
+    return {
+        "fb_coeffs": fb_coef,
+        "fb_cloud": fb_cloud,
+        "fb_cloud_err": fb_cloud_err,
+        "fb_pattern": fb_pattern if save_pattern else None,
+    }
     
 
 #CLOUD FEEDBACK shell 2008
-def feedback_cloud_wrapper(config_file: str, ker, variable_mapping_file: str):
-    """
-    Wrapper function to compute cloud radiative feedbacks using a climate dataset.
-
-    This function loads kernels, climate model outputs, and reference climatology
-    from the configuration file. It computes radiative feedback coefficients using
-    `calc_fb` and then calculates the cloud radiative feedback by performing
-    regressions between global mean temperature anomalies and cloud-related
-    radiative fluxes. Surface pressure is optionally used for specific kernels
-    (e.g., HUANG).
-
-    Parameters
-    ----------
-    config_file : str or dict
-        Path to a YAML configuration file or a preloaded configuration dictionary.
-        Must include:
-        - file_paths (input/output directories)
-        - anomaly_method
-        - time_range / time_range_exp (optional)
-        - pressure_data (required for HUANG kernels)
-        - use_atm_mask, save_pattern (optional)
-        - num_year_regr (years to aggregate in regression)
-
-    ker : str
-        Kernel type to use (`'ERA5'`, `'HUANG'`, `'SPECTRAL'`), determining
-        which kernel loader is invoked and whether surface pressure is required.
-
-    variable_mapping_file : str
-        Path to a YAML file defining variable name mappings and computed
-        variables, used to standardize datasets via `standardize_names`.
-
-    Returns
-    -------
-    fb_cloud : xarray.DataArray
-        Cloud radiative feedback data array computed from regressions against
-        global mean temperature anomalies.
-
-    fb_cloud_err : xarray.DataArray
-        Estimated error associated with the cloud feedback calculation.
-
-    """
-
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-    
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'tas'
-    allvars1= 'rlutcs rsutcs rlut rsut'.split()
-    print("Read parameters from configuration file...")
-    
-    dataset_type = config.get('dataset_type', None)
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    use_atm_mask = config.get("use_atm_mask", True)
-    save_pattern = config.get("save_pattern", False)
-    use_atm_mask = bool(use_atm_mask)
-    save_pattern = bool(save_pattern)
-    num = config.get("num_year_regr", 10)
-
-    # Read time ranges from config
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-     # Surface pressure management
-    surf_pressure = None
-    if ker == 'HUANG':  # HUANG requires surface pressure
-        pressure_path = config['file_paths'].get('pressure_data', None)
-        
-        if pressure_path:  # If pressure data is specified, load it
-            print("Loading surface pressure data...")
-            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
-            if not ps_files:
-                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
-            
-            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
-        else:
-            print("Using surface pressure passed as an array.")
-
-    print("Upload reference climatology...")
-    allvars_combined = allvars + allvars1
-    ref_clim_data = ref_clim(config_file, allvars_combined, ker, variable_mapping_file, allkers=allkers) 
-
-    fb_coef = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, num)
-
-    k=allkers[('cld', 't')]
-    for nom in allvars1:
-        ds[nom] = ctl.regrid_dataset(ds[nom], k.lat, k.lon) 
-
-    var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon)
-
-    if method in ["running_m", "running_m_mean"]:
-        # need reference without time dimension
-        clim = ref_clim_data['tas'].drop("time")
-    else:
-        # keep climatological cycle
-        clim = ref_clim_data['tas']
-
-    anoms_tas = compute_anomalies(var_tas, clim, method=method, nonlinear=False, check=True)
-        
-    gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time') 
-    start_year = int(gtas.year.min())
-    gtas= gtas.groupby((gtas.year-start_year) // num * num).mean()
-
-    fb_cloud, fb_cloud_err = feedback_cloud(ds, ref_clim_data, fb_coef, gtas, time_range_exp, num)
-
-    return fb_cloud, fb_cloud_err
-
 def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
    #questo va testato perchè non sono sicura che funzionino le cose con pimean (calcolato con climatology ha il groupby.month di cui qui non si tiene conto)
     """
