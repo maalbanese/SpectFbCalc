@@ -38,93 +38,108 @@ def mytestfunction():
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str, cart_out: str):
+def load_spectral_kernel(cart_k: str, cart_out: str, version="v2"):
     """
     Loads and preprocesses spectral kernels for further analysis.
 
-    This function reads NetCDF files containing spectrally resolved radiative kernels
-    (clear-sky and cloud-sky), selects the relevant frequency range, standardizes
-    variable names and coordinates for consistency with the Xarray data model,
-    and saves a subset of the kernels and metadata as pickle files.
+    Spectral kernels are expected as monthly climatologies split into
+    individual NetCDF files (01–12), for clear-sky and all-sky conditions.
+    The function reconstructs a monthly kernel with dimension `month`
+    (NOT `time`), to ensure compatibility with downstream calls such as
+    `anoms.groupby('time.month') * kernel`.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     cart_k : str
-        Path to the directory containing the spectral kernel NetCDF files.
-        Files must follow the naming format `spectral_kernel_ste_{tip}.nc`,
-        where `{tip}` is either `'cs'` (clear-sky) or `'cld'` (cloud-sky).
+        Base path containing spectral kernel subdirectories:
+        - clear_sky_fluxes/
+        - all_sky_fluxes/
 
     cart_out : str
-        Path to the directory where the processed kernels and metadata
-        (pressure levels and selected kernel fields) will be saved as pickle
-        files.
+        Output directory for pickled kernel objects.
 
-    Returns:
-    --------
+    version : str, optional
+        Kernel version string (default: "v2").
+
+    Returns
+    -------
     allkers : dict
-        A dictionary containing the processed kernels.  
-        The dictionary keys are tuples of the form `(tip, variable)`, where:
-        - `tip`: Atmospheric condition (`'clr'` for clear-sky, `'cld'` for cloud-sky).
-        - `variable`: Standardized short name for the kernel
-          (e.g., `'t'`, `'ts'`, `'wv_lw'`, `'o3_lw'`, `'ch4_lw'`, `'n2o'`, `'co2_lw'`).
+        Dictionary with keys (tip, variable), where:
+        - tip      ∈ {"clr", "cld"}
+        - variable ∈ {"t", "ts", "wv_lw"}
 
-        Each entry contains the kernel field restricted to the frequency
-        range 650–2750 cm⁻¹.
-
-    Saved Files:
-    ------------
-    - **`k_STE.p`**: Kernel corresponding to the temperature perturbation (`'t'`)
-      under cloud-sky conditions.
-    - **`allkers_STE.p`**: Pickle file containing the full `allkers` dictionary.
-    - **`vlevs_ERA5.p`**: Pickle file containing the pressure levels (`player`)
-      extracted from the kernel files.
-
-    Notes:
-    ------
-    - The spectral kernel files must contain variables such as
-      `temp_jac`, `ts_jac`, `wv_jac`, `ozo_jac`, `ch4_jac`,
-      `n2o_jac`, and `co2_jac`.
-    - Variables defined on pressure levels are standardized by renaming
-      the coordinate `lev` to `player`.
-    - The function applies a fixed spectral selection (650–2750 cm⁻¹)
-      corresponding to the typical longwave range of interest.
-    - All kernel datasets are loaded using Xarray and saved using Pickle.
+        Each value is an xarray DataArray with dimension `month`.
     """
-    
-    tips = ['cs','cld']
-    vnams = ['temp_jac', 'ts_jac', 'wv_jac']
 
-    allkers = dict()
-    
-    for tip in tips:
-        
-        # Load kernels NetCDF files (3 years mean 2008-2010)
-        kernels = xr.open_dataset(cart_k + finam.format(tip),chunks={'time':12})
-        
-        for vna_local in vnams:
-            print(vna_local)
-            if vna_local =='temp_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 't'
-            if vna_local =='ts_jac':
-                vna = 'ts'
-            if vna_local =='wv_jac':
-                kernels[vna_local] = kernels[vna_local].rename({'lev': 'player'})
-                vna = 'wv_lw'
+    import os
+    import pickle
+    import xarray as xr
 
-            if tip =='cs':
-                allkers[('clr', vna)] = kernels[vna_local]
-            else:
-                allkers[(tip, vna)] = kernels[vna_local] #frequency selection 110-2750 cm-1 
-            
-            #Save all kernels, t kernel and pressure levels to an external file
-            vlevs = xr.load_dataset( cart_k + finam.format(tip),chunks={'time':12})['lev']
-            vlevs = vlevs.rename({'lev': 'player'})
-            pickle.dump(allkers, open(cart_out + 'allkers_SPECTRAL.p', 'wb'))
-            pickle.dump(vlevs, open(cart_out + 'vlevs_SPECTRAL.p', 'wb')) #save vlevs
-            cose = 100*vlevs.player
-            pickle.dump(cose, open(cart_out + 'cose_SPECTRAL.p', 'wb'))
-    
+    # mapping: filename tag → (output tag, subdirectory)
+    tips = {
+        "clear": ("clr", "clear_sky_fluxes"),
+        "cld":   ("cld", "all_sky_fluxes"),
+    }
+
+    # variable name mapping: nc_name → (out_name, has_lev)
+    vnams = {
+        "temp_jac": ("t", True),
+        "ts_jac":   ("ts", False),
+        "wv_jac":   ("wv_lw", True),
+    }
+
+    allkers = {}
+    vlevs = None
+
+    for tip_raw, (tip_out, subdir) in tips.items():
+
+        sky_dir = os.path.join(cart_k, subdir)
+        ds_months = []
+
+        # --- load monthly files ---
+        for month in range(1, 13):
+            fname = f"spectral_fluxes_kernel_longwave_{month:02d}_{tip_raw}_{version}.nc"
+            fpath = os.path.join(sky_dir, fname)
+            if not os.path.exists(fpath):
+                raise FileNotFoundError(f"Missing spectral kernel file: {fpath}")
+            ds = xr.open_dataset(fpath)
+            # explicitly tag the month (temporary time-like dimension)
+            ds = ds.expand_dims(time=[month])
+            ds_months.append(ds)
+
+        # --- concatenate months ---
+        kernels = xr.concat(ds_months, dim="time")
+        if kernels.sizes.get("time", 0) != 12:
+            raise ValueError("Spectral kernel must have exactly 12 months")
+
+        # 🔑 CRUCIAL STEP:
+        # convert time → month so downstream groupby('time.month') works
+        kernels = (
+            kernels
+            .assign_coords(month=("time", kernels["time"].values))
+            .swap_dims({"time": "month"})
+            .drop_vars("time")
+        )
+
+        # --- extract kernels ---
+        for vna_local, (vna_out, has_lev) in vnams.items():
+            ker = kernels[vna_local]
+            if has_lev:
+                ker = ker.rename({"lev": "player"})
+            allkers[(tip_out, vna_out)] = ker
+
+        # --- pressure levels (once is enough) ---
+        if vlevs is None and "lev" in kernels.coords:
+            vlevs = kernels["lev"].rename({"lev": "player"})
+
+    # --- save outputs ---
+    with open(os.path.join(cart_out, "allkers_SPECTRAL.p"), "wb") as f:
+        pickle.dump(allkers, f)
+    with open(os.path.join(cart_out, "vlevs_SPECTRAL.p"), "wb") as f:
+        pickle.dump(vlevs, f)
+    with open(os.path.join(cart_out, "cose_SPECTRAL.p"), "wb") as f:
+        pickle.dump(100 * vlevs.player, f)
+
     return allkers
 
 def load_kernel_ERA5(cart_k, cart_out, finam):
@@ -285,27 +300,30 @@ def load_kernel_wrapper(ker, config_file: str):
     else:
         config = config_file 
 
-    if ker=='ERA5':
-        cart_k = config['kernels']['era5']['path_input']
+    if ker == 'ERA5':
+        cart_k  = config['kernels']['era5']['path_input']
         cart_out = config['kernels']['era5']['path_output']
-        finam = config['kernels']['era5']['filename_template']
+        finam   = config['kernels']['era5']['filename_template']
+        allkers = load_kernel(ker, cart_k, cart_out, finam)
 
-    if ker=='HUANG':
-       cart_k = config['kernels']['huang']['path_input']
-       cart_out = config['kernels']['huang']['path_output']
-       finam = config['kernels']['huang']['filename_template']
-    
-    if ker=='SPECTRAL':
-       #da modificare
-       cart_k = config['kernels']['spect']['path_input']
-       cart_out = config['kernels']['spect']['path_output']
-       finam = config['kernels']['spect']['filename_template']    
-     
-    allkers = load_kernel(ker, cart_k, cart_out, finam)
+    elif ker == 'HUANG':
+        cart_k  = config['kernels']['huang']['path_input']
+        cart_out = config['kernels']['huang']['path_output']
+        finam   = config['kernels']['huang']['filename_template']
+        allkers = load_kernel(ker, cart_k, cart_out, finam)
+
+    elif ker == 'SPECTRAL':
+        cart_k  = config['kernels']['spect']['path_input']
+        cart_out = config['kernels']['spect']['path_output']
+        # NOTA: niente finam
+        allkers = load_kernel(ker, cart_k, cart_out)
+
+    else:
+        raise ValueError(f"Unknown kernel type: {ker}")
 
     return allkers
 
-def load_kernel(ker, cart_k, cart_out, finam):
+def load_kernel(ker, cart_k, cart_out, finam=None):
     """
     Selects and loads radiative kernels from different sources.
 
@@ -358,13 +376,17 @@ def load_kernel(ker, cart_k, cart_out, finam):
     - If an unsupported kernel name is provided, the function will fail
       silently unless additional validation is added.
     """
-    if ker=='ERA5':
-         allkers=load_kernel_ERA5(cart_k, cart_out, finam)
-    if ker=='HUANG':
-         allkers=load_kernel_HUANG(cart_k, cart_out, finam)
-    if ker =='SPECTRAL':
-         allkers = load_spectral_kernel(cart_k, cart_out, finam)
-    return allkers
+    if ker == 'ERA5':
+        return load_kernel_ERA5(cart_k, cart_out, finam)
+
+    elif ker == 'HUANG':
+        return load_kernel_HUANG(cart_k, cart_out, finam)
+
+    elif ker == 'SPECTRAL':
+        return load_spectral_kernel(cart_k, cart_out)
+
+    else:
+        raise ValueError(f"Unsupported kernel type: {ker}")
 
 ###### LOAD AND CHECK DATA
 def read_data(config_file: str, variable_mapping_file: str = "configvariable.yml") -> xr.Dataset:
@@ -1095,10 +1117,7 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, time_range=None, m
             dRt = (anoms * kernel).mean("month")
         elif method in ["climatology", "running_m"]:
             # monthly or direct → compute yearly mean after grouping anomalies by month
-            if ker == 'SPECTRAL':
-                dRt = anoms.groupby('time.month')*kernel
-            else:
-                dRt = (anoms.groupby("time.month") * kernel).groupby("time.year").mean("time")
+            dRt = (anoms.groupby("time.month") * kernel).groupby("time.year").mean("time")
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
@@ -1320,8 +1339,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
                 dRt_unif = (anoms_unif * kernel * wid_mask / 100).sum("player")
                 dRt_lr = (anoms_lr * kernel * wid_mask / 100).sum("player")
             if ker == "ERA5":
-                dRt_unif = (anoms_unif * kernel * vlevs.dp / 100).sum("player")
-                dRt_lr = (anoms_lr * kernel * vlevs.dp / 100).sum("player")
+                dRt_unif = (anoms_unif * (kernel * vlevs.dp / 100)).sum("player")
+                dRt_lr = (anoms_lr * (kernel * vlevs.dp / 100)).sum("player")
             if ker == 'SPECTRAL':
                 dRt_unif = (anoms_unif*kernel).sum(dim="player")
                 dRt_lr = (anoms_lr*kernel).sum(dim="player")
@@ -1483,6 +1502,11 @@ def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, time_range=None, method
 """
     
     radiation=dict()
+
+    if ker == "SPECTRAL":
+        print("Skipping albedo feedback for SPECTRAL kernels (not defined).")
+        return radiation
+
     k=allkers[('cld', 't')]
 
     # define suffix for saved files based on method only
@@ -1723,8 +1747,10 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     
     var_int = var.interp(plev = cose)
     
-    if ker == "HUANG":
+    if ker != 'SPECTRAL':
         vlevs = pickle.load(open(cart_out + f"vlevs_{ker}.p", "rb"))
+
+    if ker == "HUANG":
         wid_mask = mask_pres(surf_pressure, cart_out, allkers, config_file)
 
         # nonlinear anomalies (log)
@@ -2289,6 +2315,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, me
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
     gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
+
     if save_pattern:
         gtas = gtas.chunk({'year': -1})
 
