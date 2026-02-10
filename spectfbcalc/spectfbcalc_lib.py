@@ -38,7 +38,7 @@ def mytestfunction():
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str, cart_out: str, version="v2"):
+def load_spectral_kernel(cart_k: str, cart_out: str, version="v3"):
     """
     Loads and preprocesses spectral kernels for further analysis.
 
@@ -59,7 +59,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v2"):
         Output directory for pickled kernel objects.
 
     version : str, optional
-        Kernel version string (default: "v2").
+        Kernel version string (default: "v3").
 
     Returns
     -------
