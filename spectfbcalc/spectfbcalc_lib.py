@@ -175,13 +175,19 @@ def load_kernel_ERA5(cart_k, cart_out, finam):
             ker=ker.rename({'latitude': 'lat', 'longitude': 'lon'})
                 
             if vna=='ta_dp':
-                ker=ker.rename({'level': 'player'})
+                ker=ker.rename({'level': 'plev'})
+                ker = ker.assign_coords(plev = ker.coords["plev"] *100)
+                ker.coords["plev"].attrs["units"] = "Pa"
                 vna='t'
             if vna=='wv_lw_dp':
-                ker=ker.rename({'level': 'player'})
+                ker=ker.rename({'level': 'plev'})
+                ker = ker.assign_coords(plev = ker.coords["plev"] *100)
+                ker.coords["plev"].attrs["units"] = "Pa"
                 vna='wv_lw'
             if vna=='wv_sw_dp':
-                ker=ker.rename({'level': 'player'})
+                ker=ker.rename({'level': 'plev'})
+                ker = ker.assign_coords(plev = ker.coords["plev"] *100)
+                ker.coords["plev"].attrs["units"] = "Pa"
                 vna='wv_sw'
             if tip=='clr':
                 stef=ker.TOA_clr
@@ -191,10 +197,8 @@ def load_kernel_ERA5(cart_k, cart_out, finam):
 
     
     vlevs = xr.load_dataset( cart_k+'dp_era5.nc')
-    vlevs=vlevs.rename({'level': 'player', 'latitude': 'lat', 'longitude': 'lon'})
-    cose = 100*vlevs.player
+    vlevs=vlevs.rename({'level': 'plev', 'latitude': 'lat', 'longitude': 'lon'})
     pickle.dump(vlevs, open(cart_out + 'vlevs_ERA5.p', 'wb'))
-    pickle.dump(cose, open(cart_out + 'cose_ERA5.p', 'wb'))
     return allkers
 
 def load_kernel_HUANG(cart_k, cart_out, finam):
@@ -220,7 +224,6 @@ def load_kernel_HUANG(cart_k, cart_out, finam):
     The function also saves three objects as pickle files in a predefined output directory:
       - `vlevs.p`: The vertical levels data from the 'dp.nc' file.
       - `k.p`: The longwave kernel data corresponding to cloudy-sky temperature ('cld', 't').
-      - `cose.p`: A scaled version (100x) of the 'player' variable from the vertical levels data.
     """
     vnams = ['t', 'ts', 'wv_lw', 'wv_sw', 'alb']
     tips = ['clr', 'cld']
@@ -234,6 +237,10 @@ def load_kernel_HUANG(cart_k, cart_out, finam):
                 print("ERRORE: Il file non esiste ->", file_path)
             else:
                 ker = xr.load_dataset(file_path)
+                if vna in ('t', 'wv_lw', 'wv_sw'):
+                    ker=ker.rename({'player': 'plev'})
+                    ker = ker.assign_coords(plev = ker.coords["plev"] *100)
+                    ker.coords["plev"].attrs["units"] = "Pa"
 
             allkers[(tip, vna)] = ker.assign_coords(month = np.arange(1, 13))
             if vna in ('ts', 't', 'wv_lw'):
@@ -242,9 +249,8 @@ def load_kernel_HUANG(cart_k, cart_out, finam):
                 allkers[(tip, vna)]=allkers[(tip, vna)].swkernel
 
     vlevs = xr.load_dataset( cart_k + 'dp.nc')  
+    vlevs=vlevs.rename({'player': 'plev'})
     pickle.dump(vlevs, open(cart_out + 'vlevs_HUANG.p', 'wb'))
-    cose = 100*vlevs.player
-    pickle.dump(cose, open(cart_out + 'cose_HUANG.p', 'wb'))
 
     return allkers
 
@@ -275,7 +281,6 @@ def load_kernel_wrapper(ker, config_file: str):
     Saved Files:
     ------------
     - **`vlevs_ker.p`**: Pickle file containing the pressure levels (`player`).
-    - **`cose_ker.p`**: Pickle file containing the pressure levels scaled to hPa.
     - **`allkers_ker.p`**: Pickle file containing all preprocessed kernels.
 
     """
@@ -478,6 +483,16 @@ def standardize_names(ds, dataset_type="ece3", configvar_file="configvariable.ym
 def check_data(ds, piok):
     if len(ds["time"]) != len(piok["time"]):
         raise ValueError("Error: The 'time' columns in 'ds' and 'piok' must have the same length. To fix use variable 'time_range' of the function")
+    return
+
+def check_vertical(var):
+    units = getattr(var.plev, "units", None)
+    if units is None:
+        print('no units identified for vertical dimension. Assuming Pa')
+        return
+
+    if units != "Pa":
+        sys.exit('Vertical dimention MUST be Pa')
     return
 
 def preproc(ds):
@@ -704,8 +719,8 @@ def mask_pres(surf_pressure, cart_out:str, allkers, config_file=None):
     wid_mask : xarray.DataArray
         A mask indicating the vertical pressure distribution for each grid point. 
         Dimensions depend on the kernel data and regridded surface pressure:
-        - For HUANG: [`player`, `lat`, `lon`]
-        - For ERA5: [`player`, `month`, `lat`, `lon`]
+        - For HUANG: [`plev`, `lat`, `lon`]
+        - For ERA5: [`plev`, `month`, `lat`, `lon`]
 
     Notes:
     ------
@@ -765,13 +780,13 @@ def mask_pres(surf_pressure, cart_out:str, allkers, config_file=None):
         raise TypeError("surf_pressure must be an xarray.Dataset or a path to NetCDF files.")
 
     psye_rg = ctl.regrid_dataset(psye, k.lat, k.lon).compute()
-    wid_mask = np.empty([len(vlevs.player)] + list(psye_rg.shape))
+    wid_mask = np.empty([len(vlevs.plev)] + list(psye_rg.shape))
 
     for ila in range(len(psye_rg.lat)):
         for ilo in range(len(psye_rg.lon)):
-            ind = np.where((psye_rg[ila, ilo].values/100. - vlevs.player.values) > 0)[0][0]
+            ind = np.where((psye_rg[ila, ilo].values/100. - vlevs.plev.values) > 0)[0][0]
             wid_mask[:ind, ila, ilo] = np.nan
-            wid_mask[ind, ila, ilo] = psye_rg[ila, ilo].values/100. - vlevs.player.values[ind]
+            wid_mask[ind, ila, ilo] = psye_rg[ila, ilo].values/100. - vlevs.plev.values[ind]
             wid_mask[ind+1:, ila, ilo] = vlevs.dp.values[ind+1:]
         
 
@@ -1265,7 +1280,6 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     radiation=dict()
     k= allkers[('cld', 't')]
 
-    cose=pickle.load(open(cart_out + 'cose_'+ker+'.p', 'rb'))
     if ker=='HUANG':
         vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
         wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file) 
@@ -1274,6 +1288,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
    
     # define suffix for saved files based on method only
     suffix = f"_{method}"
+    print('check kernel vertical dimention')
+    check_vertical(vlevs)
 
     if time_range is not None:
         var = ds['ta'].sel(time=slice(time_range['start'], time_range['end'])) 
@@ -1286,6 +1302,11 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         var = ctl.regrid_dataset(var, k.lat, k.lon)
         var_ts = ctl.regrid_dataset(var_ts, k.lat, k.lon)
 
+    print('check experiment vertical dimention')
+    check_vertical(var)
+    print('check climatology vertical dimention')
+    check_vertical(piok['ta'])
+
     # Anomaly computation (always linear here)
     ta_anom = compute_anomalies(var, piok["ta"], method=method, nonlinear=False, check=True)
     ts_anom = compute_anomalies(var_ts, piok["ts"], method=method, nonlinear=False, check=True)
@@ -1294,9 +1315,9 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         mask = mask_atm(var)
         if method not in ["climatology", "running_m"]:
             mask = mask.groupby("time.month").mean()
-        ta_anom = (ta_anom * mask).interp(plev=cose)
+        ta_anom = (ta_anom * mask).interp(plev=vlevs.plev)
     else:
-        ta_anom = ta_anom.interp(plev=cose)
+        ta_anom = ta_anom.interp(plev=vlevs.plev)
     
     if method in ["climatology", "running_m"]:
         anoms_lr = ta_anom - ts_anom
@@ -1317,24 +1338,24 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         if method in ["climatology_mean", "running_m_mean"]:
             #anomalies already averaged over months → just mean over month dimension
             if ker == "HUANG":
-                dRt_unif = (anoms_unif * kernel * wid_mask / 100).sum("player")
-                dRt_lr = (anoms_lr * kernel * wid_mask / 100).sum("player")
+                dRt_unif = (anoms_unif * kernel * wid_mask).sum("plev")
+                dRt_lr = (anoms_lr * kernel * wid_mask).sum("plev")
             if ker == "ERA5":
-                dRt_unif = (anoms_unif * kernel * vlevs.dp / 100).sum("player")
-                dRt_lr = (anoms_lr * kernel * vlevs.dp / 100).sum("player")
+                dRt_unif = (anoms_unif * kernel * vlevs.dp).sum("plev")
+                dRt_lr = (anoms_lr * kernel * vlevs.dp).sum("plev")
             if ker == 'SPECTRAL':
-                dRt_unif = (anoms_unif*kernel).sum(dim="player")
-                dRt_lr = (anoms_lr*kernel).sum(dim="player")
+                dRt_unif = (anoms_unif*kernel).sum(dim="plev")
+                dRt_lr = (anoms_lr*kernel).sum(dim="plev")
         elif method in ["climatology", "running_m"]:
             if ker == "HUANG":
-                dRt_unif = (anoms_unif.groupby('time.month') * kernel * wid_mask / 100).sum("player")
-                dRt_lr = (anoms_lr.groupby('time.month') * kernel * wid_mask / 100).sum("player")
+                dRt_unif = (anoms_unif.groupby('time.month') * kernel * wid_mask).sum("plev")
+                dRt_lr = (anoms_lr.groupby('time.month') * kernel * wid_mask ).sum("plev")
             if ker == "ERA5":
-                dRt_unif = (anoms_unif.groupby('time.month') * (kernel * vlevs.dp / 100)).sum("player")
-                dRt_lr = (anoms_lr.groupby('time.month') * (kernel * vlevs.dp / 100)).sum("player")
+                dRt_unif = (anoms_unif.groupby('time.month') * (kernel * vlevs.dp)).sum("plev")
+                dRt_lr = (anoms_lr.groupby('time.month') * (kernel * vlevs.dp)).sum("plev")
             if ker=='SPECTRAL':
-                dRt_unif = (anoms_unif.groupby('time.month')*kernel).sum(dim="player")
-                dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="player")
+                dRt_unif = (anoms_unif.groupby('time.month')*kernel).sum(dim="plev")
+                dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="plev")
 
         # Average according to method
         if method in ["climatology", "running_m"]:
@@ -1680,19 +1701,24 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         raise ValueError("Error: The 'surf_pressure' parameter cannot be None when 'ker' is 'HUANG'.")
 
     k=allkers[('cld', 't')]
-    cose=pickle.load(open(cart_out + 'cose_'+ker+'.p', 'rb'))
     radiation=dict()
-    if ker=='ERA5':
+    if ker!='SPECTRAL':
         vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
+        print('check kernel vertical dimention')
+        check_vertical(vlevs)
     
     # define suffix for saved files based on method only
     suffix = f"_{method}"
 
-    var=ds['hus']
-    var_ta=ds['ta']
     if time_range is not None:
         var = ds['hus'].sel(time=slice(time_range['start'], time_range['end'])) 
         var_ta = ds['ta'].sel(time=slice(time_range['start'], time_range['end']))
+    else:
+        var=ds['hus']
+        var_ta=ds['ta']
+    print('check experiment vertical dimention')
+    check_vertical(var)
+
     var = ctl.regrid_dataset(var, k.lat, k.lon)
     var_ta = ctl.regrid_dataset(var_ta, k.lat, k.lon)
     if use_atm_mask==True:
@@ -1712,30 +1738,28 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     else:
         piok_ta = piok["ta"]
         piok_hus = piok["hus"]
+    print('check climatology vertical dimention')
+    check_vertical(piok_hus)
 
-    #ta_abs_pi = piok_ta.interp(plev = cose)
     if use_atm_mask==True:
-        ta_abs_pi = (piok_ta*mask.groupby("time.month")).interp(plev = cose)
-        piok_int = (piok_hus*mask.groupby("time.month")).interp(plev = cose)
+        ta_abs_pi = (piok_ta*mask.groupby("time.month")).interp(plev = vlevs.plev)
+        piok_int = (piok_hus*mask.groupby("time.month")).interp(plev = vlevs.plev)
+        var_int = (var*mask.groupby("time.month")).interp(plev = vlevs.plev)
     else:
-        ta_abs_pi = piok_ta.interp(plev = cose)
-        piok_int = piok_hus.interp(plev = cose)
-    
-    var_int = var.interp(plev = cose)
+        ta_abs_pi = piok_ta.interp(plev = vlevs.plev)
+        piok_int = piok_hus.interp(plev = vlevs.plev)
+        var_int = var.interp(plev = vlevs.plev)
+
     
     if ker == "HUANG":
-        vlevs = pickle.load(open(cart_out + f"vlevs_{ker}.p", "rb"))
         wid_mask = mask_pres(surf_pressure, cart_out, allkers, config_file)
-
         # nonlinear anomalies (log)
-        anoms_ok3 = compute_anomalies( var, piok_hus, method=method, nonlinear=True, check=True)
-        anoms_ok3 = (anoms_ok3*mask).interp(plev = cose)            
+        anoms_ok3 = compute_anomalies( var_int, piok_int, method=method, nonlinear=True, check=True)       
         coso3 = anoms_ok3 * dlnws(ta_abs_pi)
 
     if ker == "ERA5":
         # linear anomalies (x - clim)
-        anoms = compute_anomalies(var, piok_hus, method=method, nonlinear=False, check=True)
-        anoms = (anoms*mask).interp(plev = cose)  
+        anoms = compute_anomalies(var_int, piok_int, method=method, nonlinear=False, check=True)
         coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
 
     if ker == "SPECTRAL":
@@ -1755,30 +1779,30 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         
         if ker=='HUANG':
             if method in ["climatology", "running_m"]:
-                dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('player').groupby('time.year').mean('time')
-                dRt_lw = (coso3.groupby('time.month')* kernel_lw* wid_mask/100).sum('player').groupby('time.year').mean('time')
-                dRt_sw = (coso3.groupby('time.month')* kernel_sw* wid_mask/100).sum('player').groupby('time.year').mean('time')
+                dRt = (coso3.groupby('time.month')* kernel* wid_mask).sum('plev').groupby('time.year').mean('time')
+                dRt_lw = (coso3.groupby('time.month')* kernel_lw* wid_mask).sum('plev').groupby('time.year').mean('time')
+                dRt_sw = (coso3.groupby('time.month')* kernel_sw* wid_mask).sum('plev').groupby('time.year').mean('time')
             else:
-                dRt = (coso3* kernel* wid_mask/100).sum('player').mean('month')
-                dRt_lw = (coso3* kernel_lw* wid_mask/100).sum('player').mean('month')
-                dRt_sw = (coso3* kernel_sw* wid_mask/100).sum('player').mean('month')
+                dRt = (coso3* kernel* wid_mask).sum('plev').mean('month')
+                dRt_lw = (coso3* kernel_lw* wid_mask).sum('plev').mean('month')
+                dRt_sw = (coso3* kernel_sw* wid_mask).sum('plev').mean('month')
 
         if ker=='ERA5':
             if method in ["climatology", "running_m"]:
-                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp/100) ).sum('player').groupby('time.year').mean('time')
-                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp/100) ).sum('player').groupby('time.year').mean('time')
-                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp/100) ).sum('player').groupby('time.year').mean('time')
+                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp) ).sum('plev').groupby('time.year').mean('time')
+                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp) ).sum('plev').groupby('time.year').mean('time')
+                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp) ).sum('plev').groupby('time.year').mean('time')
             
             else:
-                dRt = (coso*( kernel* vlevs.dp / 100)).sum('player').mean('month')
-                dRt_lw = (coso*( kernel_lw* vlevs.dp / 100)).sum('player').mean('month')
-                dRt_sw = (coso*( kernel_sw* vlevs.dp / 100)).sum('player').mean('month')
+                dRt = (coso*( kernel* vlevs.dp)).sum('plev').mean('month')
+                dRt_lw = (coso*( kernel_lw* vlevs.dp)).sum('plev').mean('month')
+                dRt_sw = (coso*( kernel_sw* vlevs.dp)).sum('plev').mean('month')
 
         if ker=='SPECTRAL':
             if method in ["climatology", "running_m"]:
-                dRt= (anoms.groupby('time.month')*kernel).sum(dim="player").groupby('time.year').mean('time')
+                dRt= (anoms.groupby('time.month')*kernel).sum(dim="plev").groupby('time.year').mean('time')
             else:
-                dRt = (anoms*kernel).sum(dim="player").mean('month')
+                dRt = (anoms*kernel).sum(dim="plev").mean('month')
                 
         #Save full dRt pattern before global averaging
         if save_pattern:
@@ -2636,7 +2660,6 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
 
 #CLOUD FEEDBACK shell 2008
 def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
-   #questo va testato perchè non sono sicura che funzionino le cose con pimean (calcolato con climatology ha il groupby.month di cui qui non si tiene conto)
     """
     Compute cloud radiative feedback strength and associated error.
 
