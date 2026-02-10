@@ -38,7 +38,7 @@ def mytestfunction():
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str, cart_out: str, version="v2"):
+def load_spectral_kernel(cart_k: str, cart_out: str, version="v2", use_cached=True):
     """
     Loads and preprocesses spectral kernels for further analysis.
 
@@ -74,6 +74,16 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v2"):
     import os
     import pickle
     import xarray as xr
+
+    allkers_file = os.path.join(cart_out, "allkers_SPECTRAL.p")
+    vlevs_file   = os.path.join(cart_out, "vlevs_SPECTRAL.p")
+    cose_file    = os.path.join(cart_out, "cose_SPECTRAL.p")
+
+    if use_cached and os.path.exists(allkers_file):
+        print("Loading cached SPECTRAL kernels...")
+        with open(allkers_file, "rb") as f:
+            allkers = pickle.load(f)
+        return allkers
 
     # mapping: filename tag → (output tag, subdirectory)
     tips = {
@@ -112,7 +122,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v2"):
         if kernels.sizes.get("time", 0) != 12:
             raise ValueError("Spectral kernel must have exactly 12 months")
 
-        # 🔑 CRUCIAL STEP:
+        # CRUCIAL STEP:
         # convert time → month so downstream groupby('time.month') works
         kernels = (
             kernels
@@ -1351,7 +1361,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         # Average according to method
         if method in ["climatology", "running_m"]:
             dRt_unif = dRt_unif.groupby("time.year").mean("time")
-            dRt_lr = dRt_lr.groupby("time.year").mean("time")
+            dRt_lr = dRt_lr.groupby("time.year").mean("time") 
         else:
             dRt_unif = dRt_unif.mean("month")
             dRt_lr = dRt_lr.mean("month")
@@ -1900,8 +1910,14 @@ def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
     allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, variable_mapping_file)
+    compute_cfg = config.get("compute", {})
+    compute_albedo = compute_cfg.get("albedo", True)
     print("Variables to consider upload...")
-    allvars = 'ts tas hus alb ta'.split()
+    allvars = 'ts tas hus ta'.split()
+    if compute_albedo:
+        allvars.append('alb')
+    else:
+        print("Config: albedo computation disabled.")
     allvars_c = 'rlutcs rsutcs rlut rsut'.split()
     if all(var in ds.variables for var in allvars_c):
         allvars = allvars + allvars_c  # extend the list
@@ -2043,6 +2059,15 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=N
     # define suffix for saved files based on method only
     suffix = f"_{method}"
 
+    if isinstance(config_file, str):
+        with open(config_file, 'r') as file:
+            config = yaml.safe_load(file)
+    else:
+        config = config_file
+
+    compute_cfg = config.get("compute", {})
+    compute_albedo = compute_cfg.get("albedo", True)
+
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+ suffix +"-"+ker+"kernels.nc")
     if not os.path.exists(path):
@@ -2057,12 +2082,21 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=N
     else:
         anom_pal = xr.open_dataset(path)
     
-    print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
-        anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern)
+    anom_a = None
+    if compute_albedo:
+        print('albedo')
+        path = os.path.join(
+            cart_out,
+            "dRt_albedo_global_clr" + suffix + "-" + ker + "kernels.nc"
+        )
+        if not os.path.exists(path):
+            anom_a = Rad_anomaly_albedo(
+                ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern
+            )
+        else:
+            anom_a = xr.open_dataset(path)
     else:
-        anom_a = xr.open_dataset(path)
+        print("Skipping albedo anomaly (disabled in config).")
     
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+ suffix +"-"+ker+"kernels.nc")

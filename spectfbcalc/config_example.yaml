@@ -12,8 +12,7 @@ kernels:
     spect:
       path_input: "/path/to/kernels/spectral/toa/"
       path_output: "/path/to/kernels/output/"
-      filename_template: "spectral_{}_kernel_longwave_{}.nc" 
-
+   
 file_paths:
    reference_dataset: "/path/to/reference_data/"
    reference_dataset_pl: "/path/to/reference_data/level_pressure" #to use if vertical data are separate from others
@@ -24,6 +23,8 @@ file_paths:
    output: "/path/to/output/"
 
 anomaly_method: "" #specify the anomaly method: climatology, running_m, climatology_mean, running_m_mean
+compute:
+   albedo: false #specify if you want to compute albedo feedbacks, if true, you need to have the surface albedo variable in your dataset
 use_atm_mask: True
 save_pattern: False
 num_year_regr: 10 #number of years to group for regression
