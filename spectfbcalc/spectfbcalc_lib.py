@@ -480,6 +480,13 @@ def check_data(ds, piok):
         raise ValueError("Error: The 'time' columns in 'ds' and 'piok' must have the same length. To fix use variable 'time_range' of the function")
     return
 
+def preproc(ds):
+    ds = ds.assign_coords(lat = ds.lat.round(4))
+    if 'lat_bnds' in ds:
+        ds['lat_bnds'] = ds['lat_bnds'].round(4)
+    
+    return ds
+
 ######################################################################################
 #### Aux functions
 def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers=None):
@@ -520,7 +527,7 @@ def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers
     if not filin_pi:
         raise ValueError("Error: the 'reference_dataset' path is not specified in the configuration file.")
 
-    ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', compat='no_conflicts', use_cftime=True, chunks={'time': time_chunk})]
+    ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', compat='no_conflicts', use_cftime=True, preprocess = preproc, chunks={'time': time_chunk})]
     
     if filin_pi_pl and filin_pi_pl.strip():
         ds_list.append(xr.open_mfdataset(filin_pi_pl, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
@@ -1323,8 +1330,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
                 dRt_unif = (anoms_unif.groupby('time.month') * kernel * wid_mask / 100).sum("player")
                 dRt_lr = (anoms_lr.groupby('time.month') * kernel * wid_mask / 100).sum("player")
             if ker == "ERA5":
-                dRt_unif = (anoms_unif.groupby('time.month') * kernel * vlevs.dp / 100).sum("player")
-                dRt_lr = (anoms_lr.groupby('time.month') * kernel * vlevs.dp / 100).sum("player")
+                dRt_unif = (anoms_unif.groupby('time.month') * (kernel * vlevs.dp / 100)).sum("player")
+                dRt_lr = (anoms_lr.groupby('time.month') * (kernel * vlevs.dp / 100)).sum("player")
             if ker=='SPECTRAL':
                 dRt_unif = (anoms_unif.groupby('time.month')*kernel).sum(dim="player")
                 dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="player")
@@ -1691,8 +1698,8 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     if use_atm_mask==True:
         mask=mask_atm(var_ta)
 
-    Rv = 487.5 # gas constant of water vapor
-    Lv = 2.5e+06 # latent heat of water vapor
+    Rv = 461.5 # gas constant of water vapor
+    Lv = 2.25e+06 # latent heat of water vapor
 
     if method in ["running_m", "running_m_mean"]:
         # Time alignment needed
@@ -1706,32 +1713,30 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         piok_ta = piok["ta"]
         piok_hus = piok["hus"]
 
-    ta_abs_pi = piok_ta.interp(plev = cose)
+    #ta_abs_pi = piok_ta.interp(plev = cose)
     if use_atm_mask==True:
-        var_int = (var*mask).interp(plev = cose)
+        ta_abs_pi = (piok_ta*mask.groupby("time.month")).interp(plev = cose)
+        piok_int = (piok_hus*mask.groupby("time.month")).interp(plev = cose)
     else:
-        var_int = var.interp(plev = cose)
-    piok_int = piok_hus.interp(plev = cose)
+        ta_abs_pi = piok_ta.interp(plev = cose)
+        piok_int = piok_hus.interp(plev = cose)
+    
+    var_int = var.interp(plev = cose)
     
     if ker == "HUANG":
         vlevs = pickle.load(open(cart_out + f"vlevs_{ker}.p", "rb"))
         wid_mask = mask_pres(surf_pressure, cart_out, allkers, config_file)
 
         # nonlinear anomalies (log)
-        anoms_ok3 = compute_anomalies(var_int, piok_int, method=method, nonlinear=True, check=True)
-        if method == "climatology":
-            coso3 = anoms_ok3.groupby("time.month") * dlnws(ta_abs_pi)
-        else:
-            coso3 = anoms_ok3 * dlnws(ta_abs_pi)
+        anoms_ok3 = compute_anomalies( var, piok_hus, method=method, nonlinear=True, check=True)
+        anoms_ok3 = (anoms_ok3*mask).interp(plev = cose)            
+        coso3 = anoms_ok3 * dlnws(ta_abs_pi)
 
     if ker == "ERA5":
         # linear anomalies (x - clim)
-        anoms = compute_anomalies(var_int, piok_int, method=method, nonlinear=False, check=True)
-
-        if method == "climatology":
-            coso = (anoms.groupby("time.month") / piok_int).groupby("time.month") * (ta_abs_pi**2) * Rv / Lv
-        else:
-            coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
+        anoms = compute_anomalies(var, piok_hus, method=method, nonlinear=False, check=True)
+        anoms = (anoms*mask).interp(plev = cose)  
+        coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
 
     if ker == "SPECTRAL":
         var_wv = q_to_ppmv(var_int)
@@ -1739,7 +1744,7 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         anoms = compute_anomalies(var_wv, piok_wv, method=method, nonlinear=False, check=True)
 
 
-    for tip in ['clr','cld']:
+    for tip in ['clr','cld']: 
         if ker != 'SPECTRAL':
             kernel_lw = allkers[(tip, 'wv_lw')]
             kernel_sw = allkers[(tip, 'wv_sw')]
@@ -1760,9 +1765,10 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
 
         if ker=='ERA5':
             if method in ["climatology", "running_m"]:
-                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')
-                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')
-                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp / 100) ).sum('player').groupby('time.year').mean('time')            
+                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp/100) ).sum('player').groupby('time.year').mean('time')
+                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp/100) ).sum('player').groupby('time.year').mean('time')
+                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp/100) ).sum('player').groupby('time.year').mean('time')
+            
             else:
                 dRt = (coso*( kernel* vlevs.dp / 100)).sum('player').mean('month')
                 dRt_lw = (coso*( kernel_lw* vlevs.dp / 100)).sum('player').mean('month')
