@@ -176,18 +176,12 @@ def load_kernel_ERA5(cart_k, cart_out, finam):
                 
             if vna=='ta_dp':
                 ker=ker.rename({'level': 'plev'})
-                ker = ker.assign_coords(plev = ker.coords["plev"] *100)
-                ker.coords["plev"].attrs["units"] = "Pa"
                 vna='t'
             if vna=='wv_lw_dp':
                 ker=ker.rename({'level': 'plev'})
-                ker = ker.assign_coords(plev = ker.coords["plev"] *100)
-                ker.coords["plev"].attrs["units"] = "Pa"
                 vna='wv_lw'
             if vna=='wv_sw_dp':
                 ker=ker.rename({'level': 'plev'})
-                ker = ker.assign_coords(plev = ker.coords["plev"] *100)
-                ker.coords["plev"].attrs["units"] = "Pa"
                 vna='wv_sw'
             if tip=='clr':
                 stef=ker.TOA_clr
@@ -239,8 +233,6 @@ def load_kernel_HUANG(cart_k, cart_out, finam):
                 ker = xr.load_dataset(file_path)
                 if vna in ('t', 'wv_lw', 'wv_sw'):
                     ker=ker.rename({'player': 'plev'})
-                    ker = ker.assign_coords(plev = ker.coords["plev"] *100)
-                    ker.coords["plev"].attrs["units"] = "Pa"
 
             allkers[(tip, vna)] = ker.assign_coords(month = np.arange(1, 13))
             if vna in ('ts', 't', 'wv_lw'):
@@ -485,15 +477,21 @@ def check_data(ds, piok):
         raise ValueError("Error: The 'time' columns in 'ds' and 'piok' must have the same length. To fix use variable 'time_range' of the function")
     return
 
-def check_vertical(var):
-    units = getattr(var.plev, "units", None)
-    if units is None:
-        print('no units identified for vertical dimension. Assuming Pa')
-        return
+def check_vertical(da):
+    plev = da.coords["plev"]
+    #units = plev.attrs.get("units")
+ 
+    min_val = float(plev.min())
 
-    if units != "Pa":
-        sys.exit('Vertical dimention MUST be Pa')
-    return
+    # Se minimo > 50 → probabilmente in Pa → convertiamo
+    if min_val > 50:
+        new_plev = plev / 100.0
+        new_plev.attrs["units"] = "hPa"
+        print('Rewriting vertical coordinates from Pa to hPa')
+        # Riassegna la coordinata convertita
+        da = da.assign_coords(plev=new_plev)
+
+    return da
 
 def preproc(ds):
     ds = ds.assign_coords(lat = ds.lat.round(4))
@@ -684,11 +682,12 @@ def mask_atm(var):
         - Values are 1 where the lapse rate (`laps1`) is less than or equal to -2 K/km.
         - Values are NaN elsewhere.
     """
-    A=(var.plev/var)*(9.81/1005)
+    A=(var.plev *100 /var)*(9.81/1005)
     laps1=(var.diff(dim='plev'))*A  #derivata sulla verticale = laspe-rate
 
     laps1=laps1.where(laps1<=-2)
-    mask = laps1/laps1
+    mask = laps1.notnull().astype(float)
+    mask = mask.where(mask == 1)
     return mask
 
 ### Mask for surf pressure
@@ -1288,8 +1287,6 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
    
     # define suffix for saved files based on method only
     suffix = f"_{method}"
-    print('check kernel vertical dimention')
-    check_vertical(vlevs)
 
     if time_range is not None:
         var = ds['ta'].sel(time=slice(time_range['start'], time_range['end'])) 
@@ -1303,9 +1300,9 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         var_ts = ctl.regrid_dataset(var_ts, k.lat, k.lon)
 
     print('check experiment vertical dimention')
-    check_vertical(var)
+    var=check_vertical(var)
     print('check climatology vertical dimention')
-    check_vertical(piok['ta'])
+    piok['ta']=check_vertical(piok['ta'])
 
     # Anomaly computation (always linear here)
     ta_anom = compute_anomalies(var, piok["ta"], method=method, nonlinear=False, check=True)
@@ -1338,21 +1335,21 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         if method in ["climatology_mean", "running_m_mean"]:
             #anomalies already averaged over months → just mean over month dimension
             if ker == "HUANG":
-                dRt_unif = (anoms_unif * kernel * wid_mask).sum("plev")
-                dRt_lr = (anoms_lr * kernel * wid_mask).sum("plev")
+                dRt_unif = (anoms_unif * kernel * wid_mask/100).sum("plev")
+                dRt_lr = (anoms_lr * kernel * wid_mask/100).sum("plev")
             if ker == "ERA5":
-                dRt_unif = (anoms_unif * kernel * vlevs.dp).sum("plev")
-                dRt_lr = (anoms_lr * kernel * vlevs.dp).sum("plev")
+                dRt_unif = (anoms_unif * kernel * vlevs.dp/100).sum("plev")
+                dRt_lr = (anoms_lr * kernel * vlevs.dp/100).sum("plev")
             if ker == 'SPECTRAL':
                 dRt_unif = (anoms_unif*kernel).sum(dim="plev")
                 dRt_lr = (anoms_lr*kernel).sum(dim="plev")
         elif method in ["climatology", "running_m"]:
             if ker == "HUANG":
-                dRt_unif = (anoms_unif.groupby('time.month') * kernel * wid_mask).sum("plev")
-                dRt_lr = (anoms_lr.groupby('time.month') * kernel * wid_mask ).sum("plev")
+                dRt_unif = (anoms_unif.groupby('time.month') * kernel * wid_mask/100).sum("plev")
+                dRt_lr = (anoms_lr.groupby('time.month') * kernel * wid_mask /100).sum("plev")
             if ker == "ERA5":
-                dRt_unif = (anoms_unif.groupby('time.month') * (kernel * vlevs.dp)).sum("plev")
-                dRt_lr = (anoms_lr.groupby('time.month') * (kernel * vlevs.dp)).sum("plev")
+                dRt_unif = (anoms_unif.groupby('time.month') * (kernel * vlevs.dp/100)).sum("plev")
+                dRt_lr = (anoms_lr.groupby('time.month') * (kernel * vlevs.dp/100)).sum("plev")
             if ker=='SPECTRAL':
                 dRt_unif = (anoms_unif.groupby('time.month')*kernel).sum(dim="plev")
                 dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="plev")
@@ -1704,8 +1701,6 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     radiation=dict()
     if ker!='SPECTRAL':
         vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
-        print('check kernel vertical dimention')
-        check_vertical(vlevs)
     
     # define suffix for saved files based on method only
     suffix = f"_{method}"
@@ -1717,7 +1712,8 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         var=ds['hus']
         var_ta=ds['ta']
     print('check experiment vertical dimention')
-    check_vertical(var)
+    var=check_vertical(var)
+    var_ta=check_vertical(var_ta)
 
     var = ctl.regrid_dataset(var, k.lat, k.lon)
     var_ta = ctl.regrid_dataset(var_ta, k.lat, k.lon)
@@ -1739,12 +1735,13 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         piok_ta = piok["ta"]
         piok_hus = piok["hus"]
     print('check climatology vertical dimention')
-    check_vertical(piok_hus)
+    piok_hus=check_vertical(piok_hus)
+    piok_ta=check_vertical(piok_ta)
 
     if use_atm_mask==True:
         ta_abs_pi = (piok_ta*mask.groupby("time.month")).interp(plev = vlevs.plev)
         piok_int = (piok_hus*mask.groupby("time.month")).interp(plev = vlevs.plev)
-        var_int = (var*mask.groupby("time.month")).interp(plev = vlevs.plev)
+        var_int = (var*mask).interp(plev = vlevs.plev)
     else:
         ta_abs_pi = piok_ta.interp(plev = vlevs.plev)
         piok_int = piok_hus.interp(plev = vlevs.plev)
@@ -1754,12 +1751,20 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     if ker == "HUANG":
         wid_mask = mask_pres(surf_pressure, cart_out, allkers, config_file)
         # nonlinear anomalies (log)
-        anoms_ok3 = compute_anomalies( var_int, piok_int, method=method, nonlinear=True, check=True)       
+        anoms_ok3 = compute_anomalies( var, piok_hus, method=method, nonlinear=True, check=True)       
+        if use_atm_mask==True:
+            anoms_ok3=(anoms_ok3*mask).interp(plev = vlevs.plev)
+        else:
+            anoms_ok3=anoms_ok3.interp(plev = vlevs.plev)
         coso3 = anoms_ok3 * dlnws(ta_abs_pi)
 
     if ker == "ERA5":
         # linear anomalies (x - clim)
-        anoms = compute_anomalies(var_int, piok_int, method=method, nonlinear=False, check=True)
+        anoms = compute_anomalies(var, piok_hus, method=method, nonlinear=False, check=True)
+        if use_atm_mask==True:
+            anoms=(anoms*mask).interp(plev = vlevs.plev)
+        else:
+            anoms=anoms.interp(plev = vlevs.plev)
         coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
 
     if ker == "SPECTRAL":
@@ -1779,24 +1784,24 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         
         if ker=='HUANG':
             if method in ["climatology", "running_m"]:
-                dRt = (coso3.groupby('time.month')* kernel* wid_mask).sum('plev').groupby('time.year').mean('time')
-                dRt_lw = (coso3.groupby('time.month')* kernel_lw* wid_mask).sum('plev').groupby('time.year').mean('time')
-                dRt_sw = (coso3.groupby('time.month')* kernel_sw* wid_mask).sum('plev').groupby('time.year').mean('time')
+                dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('plev').groupby('time.year').mean('time')
+                dRt_lw = (coso3.groupby('time.month')* kernel_lw* wid_mask/100).sum('plev').groupby('time.year').mean('time')
+                dRt_sw = (coso3.groupby('time.month')* kernel_sw* wid_mask/100).sum('plev').groupby('time.year').mean('time')
             else:
-                dRt = (coso3* kernel* wid_mask).sum('plev').mean('month')
-                dRt_lw = (coso3* kernel_lw* wid_mask).sum('plev').mean('month')
-                dRt_sw = (coso3* kernel_sw* wid_mask).sum('plev').mean('month')
+                dRt = (coso3* kernel* wid_mask/100).sum('plev').mean('month')
+                dRt_lw = (coso3* kernel_lw* wid_mask/100).sum('plev').mean('month')
+                dRt_sw = (coso3* kernel_sw* wid_mask/100).sum('plev').mean('month')
 
         if ker=='ERA5':
             if method in ["climatology", "running_m"]:
-                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp) ).sum('plev').groupby('time.year').mean('time')
-                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp) ).sum('plev').groupby('time.year').mean('time')
-                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp) ).sum('plev').groupby('time.year').mean('time')
+                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
+                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
+                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
             
             else:
-                dRt = (coso*( kernel* vlevs.dp)).sum('plev').mean('month')
-                dRt_lw = (coso*( kernel_lw* vlevs.dp)).sum('plev').mean('month')
-                dRt_sw = (coso*( kernel_sw* vlevs.dp)).sum('plev').mean('month')
+                dRt = (coso*( kernel* vlevs.dp/100)).sum('plev').mean('month')
+                dRt_lw = (coso*( kernel_lw* vlevs.dp/100)).sum('plev').mean('month')
+                dRt_sw = (coso*( kernel_sw* vlevs.dp/100)).sum('plev').mean('month')
 
         if ker=='SPECTRAL':
             if method in ["climatology", "running_m"]:
