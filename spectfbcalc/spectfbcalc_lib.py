@@ -298,7 +298,6 @@ def load_kernel_wrapper(ker, config_file: str):
         cart_out = config['kernels']['era5']['path_output']
         finam     = config['kernels']['era5']['filename_template']
         allkers = load_kernel(ker, cart_k, cart_out, finam)
-        allkers = load_kernel(ker, cart_k, cart_out, finam)
 
     elif ker == 'HUANG':
         cart_k  = config['kernels']['huang']['path_input']
