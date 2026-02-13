@@ -38,7 +38,7 @@ def mytestfunction():
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str, cart_out: str, version="v3", version="v3"):
+def load_spectral_kernel(cart_k: str, cart_out: str, version="v3"):
     """
     Loads and preprocesses spectral kernels for further analysis.
 
@@ -47,20 +47,9 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v3", version="v3")
     The function reconstructs a monthly kernel with dimension `month`
     (NOT `time`), to ensure compatibility with downstream calls such as
     `anoms.groupby('time.month') * kernel`.
-    Spectral kernels are expected as monthly climatologies split into
-    individual NetCDF files (01–12), for clear-sky and all-sky conditions.
-    The function reconstructs a monthly kernel with dimension `month`
-    (NOT `time`), to ensure compatibility with downstream calls such as
-    `anoms.groupby('time.month') * kernel`.
-
-    Parameters
-    ----------
     Parameters
     ----------
     cart_k : str
-        Base path containing spectral kernel subdirectories:
-        - clear_sky_fluxes/
-        - all_sky_fluxes/
         Base path containing spectral kernel subdirectories:
         - clear_sky_fluxes/
         - all_sky_fluxes/
@@ -70,13 +59,6 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v3", version="v3")
 
     version : str, optional
         Kernel version string (default: "v3").
-        Output directory for pickled kernel objects.
-
-    version : str, optional
-        Kernel version string (default: "v3").
-
-    Returns
-    -------
     Returns
     -------
     allkers : dict
@@ -315,8 +297,6 @@ def load_kernel_wrapper(ker, config_file: str):
 
     if ker == 'ERA5':
         cart_k  = config['kernels']['era5']['path_input']
-    if ker == 'ERA5':
-        cart_k  = config['kernels']['era5']['path_input']
         cart_out = config['kernels']['era5']['path_output']
         finam     = config['kernels']['era5']['filename_template']
         allkers = load_kernel(ker, cart_k, cart_out, finam)
@@ -336,24 +316,9 @@ def load_kernel_wrapper(ker, config_file: str):
 
     else:
         raise ValueError(f"Unknown kernel type: {ker}")
-    elif ker == 'HUANG':
-        cart_k  = config['kernels']['huang']['path_input']
-        cart_out = config['kernels']['huang']['path_output']
-        finam   = config['kernels']['huang']['filename_template']
-        allkers = load_kernel(ker, cart_k, cart_out, finam)
-
-    elif ker == 'SPECTRAL':
-        cart_k  = config['kernels']['spect']['path_input']
-        cart_out = config['kernels']['spect']['path_output']
-        # NOTA: niente finam
-        allkers = load_kernel(ker, cart_k, cart_out)
-
-    else:
-        raise ValueError(f"Unknown kernel type: {ker}")
 
     return allkers
 
-def load_kernel(ker, cart_k, cart_out, finam=None):
 def load_kernel(ker, cart_k, cart_out, finam=None):
     """
     Selects and loads radiative kernels from different sources.
