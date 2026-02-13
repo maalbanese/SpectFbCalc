@@ -47,6 +47,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v3"):
     The function reconstructs a monthly kernel with dimension `month`
     (NOT `time`), to ensure compatibility with downstream calls such as
     `anoms.groupby('time.month') * kernel`.
+
     Parameters
     ----------
     cart_k : str
@@ -59,6 +60,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v3"):
 
     version : str, optional
         Kernel version string (default: "v3").
+
     Returns
     -------
     allkers : dict
@@ -298,8 +300,7 @@ def load_kernel_wrapper(ker, config_file: str):
     if ker == 'ERA5':
         cart_k  = config['kernels']['era5']['path_input']
         cart_out = config['kernels']['era5']['path_output']
-        finam     = config['kernels']['era5']['filename_template']
-        allkers = load_kernel(ker, cart_k, cart_out, finam)
+        finam   = config['kernels']['era5']['filename_template']
         allkers = load_kernel(ker, cart_k, cart_out, finam)
 
     elif ker == 'HUANG':
