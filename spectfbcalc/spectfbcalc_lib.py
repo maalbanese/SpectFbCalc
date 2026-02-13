@@ -47,6 +47,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
     The function reconstructs a monthly kernel with dimension `month`
     (NOT `time`), to ensure compatibility with downstream calls such as
     `anoms.groupby('time.month') * kernel`.
+
     Parameters
     ----------
     cart_k : str
@@ -59,6 +60,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
 
     version : str, optional
         Kernel version string (default: "v3").
+
     Returns
     -------
     allkers : dict
