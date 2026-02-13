@@ -38,7 +38,7 @@ def mytestfunction():
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str, cart_out: str, version="v3"):
+def load_spectral_kernel(cart_k: str, cart_out: str):
     """
     Loads and preprocesses spectral kernels for further analysis.
 
@@ -96,7 +96,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v3"):
 
         # --- load monthly files ---
         for month in range(1, 13):
-            fname = f"spectral_fluxes_kernel_longwave_{month:02d}_{tip_raw}_{version}.nc"
+            fname = f"spectral_fluxes_kernel_longwave_{month:02d}_{tip_raw}.nc"
             fpath = os.path.join(sky_dir, fname)
             if not os.path.exists(fpath):
                 raise FileNotFoundError(f"Missing spectral kernel file: {fpath}")
@@ -109,8 +109,6 @@ def load_spectral_kernel(cart_k: str, cart_out: str, version="v3"):
         kernels = xr.concat(ds_months, dim="time")
         if kernels.sizes.get("time", 0) != 12:
             raise ValueError("Spectral kernel must have exactly 12 months")
-
-        # 🔑 CRUCIAL STEP:
         # convert time → month so downstream groupby('time.month') works
         kernels = (
             kernels
@@ -311,7 +309,7 @@ def load_kernel_wrapper(ker, config_file: str):
     elif ker == 'SPECTRAL':
         cart_k  = config['kernels']['spect']['path_input']
         cart_out = config['kernels']['spect']['path_output']
-        # NOTA: niente finam
+        # NO finam
         allkers = load_kernel(ker, cart_k, cart_out)
 
     else:
