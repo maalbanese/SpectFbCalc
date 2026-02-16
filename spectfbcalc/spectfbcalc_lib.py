@@ -77,8 +77,8 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
 
     # mapping: filename tag → (output tag, subdirectory)
     tips = {
-        "clear": ("clr", "clear_sky_fluxes"),
-        "cld":   ("cld", "all_sky_fluxes"),
+        "clear": ("clr", "clearsky_fluxes"),
+        "cloudy":   ("cld", "allsky_fluxes"),
     }
 
     # variable name mapping: nc_name → (out_name, has_lev)
@@ -102,7 +102,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
             fpath = os.path.join(sky_dir, fname)
             if not os.path.exists(fpath):
                 raise FileNotFoundError(f"Missing spectral kernel file: {fpath}")
-            ds = xr.open_dataset(fpath)
+            ds = xr.open_dataset(fpath, chunks="auto")
             # explicitly tag the month (temporary time-like dimension)
             ds = ds.expand_dims(time=[month])
             ds_months.append(ds)
@@ -131,10 +131,12 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
             vlevs = kernels["lev"].rename({"lev": "player"})
 
     # --- save outputs ---
-    with open(os.path.join(cart_out, "allkers_SPECTRAL.p"), "wb") as f:
-        pickle.dump(allkers, f)
-    with open(os.path.join(cart_out, "vlevs_SPECTRAL.p"), "wb") as f:
-        pickle.dump(vlevs, f)
+    ds_out = xr.Dataset()
+
+    for (tip, vname), da in allkers.items():
+        ds_out[f"{tip}_{vname}"] = da
+    ds_out.to_netcdf(os.path.join(cart_out, "allkers_SPECTRAL.nc"),format="NETCDF4")
+    vlevs.to_netcdf(os.path.join(cart_out, "vlevs_SPECTRAL.nc"))
 
     return allkers
 
