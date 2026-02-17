@@ -123,21 +123,21 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
         for vna_local, (vna_out, has_lev) in vnams.items():
             ker = kernels[vna_local]
             if has_lev:
-                ker = ker.rename({"lev": "player"})
+                ker = ker.rename({"lev": "plev"})
             allkers[(tip_out, vna_out)] = ker
 
         # --- pressure levels (once is enough) ---
         if vlevs is None and "lev" in kernels.coords:
-            vlevs = kernels["lev"].rename({"lev": "player"})
+            vlevs = kernels["lev"].rename({"lev": "plev"})
 
     # --- save outputs ---
     ds_out = xr.Dataset()
 
     for (tip, vname), da in allkers.items():
         ds_out[f"{tip}_{vname}"] = da
-    ds_out.to_netcdf(os.path.join(cart_out, "allkers_SPECTRAL.nc"),format="NETCDF4")
-    vlevs.to_netcdf(os.path.join(cart_out, "vlevs_SPECTRAL.nc"))
-
+    pickle.dump(allkers, open(os.path.join(cart_out, "allkers_SPECTRAL.p"), "wb"))
+    pickle.dump(vlevs, open(os.path.join(cart_out, "vlevs_SPECTRAL.p"), "wb"))
+    
     return allkers
 
 
@@ -1300,11 +1300,10 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     radiation=dict()
     k= allkers[('cld', 't')]
 
+    vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
     if ker=='HUANG':
-        vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
         wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file) 
-    if ker=='ERA5':
-        vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
+
    
     # define suffix for saved files based on method only
     suffix = f"_{method}"
@@ -1725,8 +1724,8 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
 
     k=allkers[('cld', 't')]
     radiation=dict()
-    if ker!='SPECTRAL':
-        vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
+    
+    vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
     
     # define suffix for saved files based on method only
     suffix = f"_{method}"
