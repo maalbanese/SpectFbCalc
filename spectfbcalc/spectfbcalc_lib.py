@@ -2898,3 +2898,88 @@ def feedback_cloud_interannual(ds, piok, fb_coef, surf_anomaly, time_range=None,
 
     
     return fb_cloud, fb_cloud_err
+
+def single_feedback_wrapper(name:str, config_file: str, ker, variable_mapping_file: str):
+    if isinstance(config_file, str):
+        with open(config_file, 'r') as file:
+            config = yaml.safe_load(file)
+    else:
+        config = config_file 
+    
+    print("Kernel upload...")
+    allkers = load_kernel_wrapper(ker, config_file)
+    print("Dataset to analyze upload...")
+    ds = read_data(config_file, variable_mapping_file)
+    print("Variables to consider upload...")
+    allvars = 'tas'.split()
+    piok = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
+    cart_out = config['file_paths'].get("output")
+    method = config.get("anomaly_method")
+    if method is None:
+        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
+    num=config.get("num_year_regr", 10)
+    time_range_clim = config.get("time_range", {})
+    time_range_exp = config.get("time_range_exp", {})
+    # Validate and clean time ranges
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
+    # Determine usage scenario
+    if time_range_exp and not time_range_clim:
+        print("Only experiment time range is provided. Using it for analysis.")
+    elif time_range_exp and time_range_clim:
+        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
+    elif time_range_clim and not time_range_exp:
+        print("Only climatology time range is provided. Using it for both climatology and experiment.")
+        time_range_exp = time_range_clim  # fallback
+    else:
+        print("No valid time ranges provided. Proceeding with full time range in the data.")
+
+
+    fb=dict()
+    fb=single_feedback(name, config_file, ker, variable_mapping_file, cart_out, allkers,  ds, piok, time_range_exp, method, num )
+    return fb
+
+
+
+def single_feedback(name, config_file, ker, variable_mapping_file, cart_out, allkers, ds, piok, time_range, method, num):
+    suffix = f"_{method}"
+    k=allkers[('cld', 't')]
+    if time_range is not None:
+        var_tas = ds['tas'].sel(time=slice(time_range['start'], time_range['end'])) 
+        var_tas= ctl.regrid_dataset(var_tas, k.lat, k.lon)  
+    else:
+        var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon) 
+
+    anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, nonlinear=False, check=True)
+
+    gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
+    start_year = int(gtas.year.min()) 
+    gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
+    path = os.path.join(cart_out, "dRt_"+name+"_global_clr"+suffix+"-"+ker+"kernels.nc")
+    if not os.path.exists(path):
+        print('Using '+name + ' radiation anomalies function')
+        if name=='albedo':
+            Rad_anomaly_albedo_wrapper(config_file, ker, variable_mapping_file)
+
+        elif name=='planck-surf':
+            Rad_anomaly_planck_surf_wrapper(config_file, ker, variable_mapping_file)
+
+        elif name=='planck-atmo':
+            Rad_anomaly_planck_atm_lr_wrapper(config_file, ker, variable_mapping_file)
+
+        elif name=='water-vapor':
+            Rad_anomaly_wv_wrapper(config_file, ker, variable_mapping_file)
+
+        elif name=='lapse-rate':
+            Rad_anomaly_planck_atm_lr_wrapper(config_file, ker, variable_mapping_file)
+    
+    fb=dict()
+    for tip in ['clr', 'cld']:
+        feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+ suffix +"-"+ker+"kernels.nc",  use_cftime=True)
+        start_year = int(feedbacks.year.min())
+        feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
+
+        res = stats.linregress(gtas, feedback)
+        fb[(tip, name)] = res
+
+    return fb
