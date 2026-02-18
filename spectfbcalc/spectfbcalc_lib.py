@@ -705,7 +705,7 @@ def mask_atm(var):
         - Values are 1 where the lapse rate (`laps1`) is less than or equal to -2 K/km.
         - Values are NaN elsewhere.
     """
-    A=(var.plev *100 /var)*(9.81/1005)
+    A=(var.plev *100 /var)*(9.81/1005) # 
     laps1=(var.diff(dim='plev'))*A  #derivata sulla verticale = laspe-rate
 
     laps1=laps1.where(laps1<=-2)
@@ -1763,16 +1763,9 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     piok_hus=check_vertical(piok_hus)
     piok_ta=check_vertical(piok_ta)
 
-    if use_atm_mask==True:
-        ta_abs_pi = (piok_ta*mask.groupby("time.month")).interp(plev = vlevs.plev)
-        piok_int = (piok_hus*mask.groupby("time.month")).interp(plev = vlevs.plev)
-        var_int = (var*mask).interp(plev = vlevs.plev)
-    else:
-        ta_abs_pi = piok_ta.interp(plev = vlevs.plev)
-        piok_int = piok_hus.interp(plev = vlevs.plev)
-        var_int = var.interp(plev = vlevs.plev)
+    ta_abs_pi = piok_ta.interp(plev = vlevs.plev)
+    piok_int = piok_hus.interp(plev = vlevs.plev)
 
-    
     if ker == "HUANG":
         wid_mask = mask_pres(surf_pressure, cart_out, allkers, config_file)
         # nonlinear anomalies (log)
@@ -1793,9 +1786,11 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
 
     if ker == "SPECTRAL":
-        var_wv = q_to_ppmv(var_int)
-        piok_wv =q_to_ppmv(piok_int)
+        var_wv = q_to_ppmv(var)
+        piok_wv =q_to_ppmv(piok_hus)
         anoms = compute_anomalies(var_wv, piok_wv, method=method, nonlinear=False, check=True)
+        anoms=(anoms*mask).interp(plev = vlevs.plev)
+
 
 
     for tip in ['clr','cld']: 
