@@ -77,8 +77,8 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
 
     # mapping: filename tag → (output tag, subdirectory)
     tips = {
-        "clear": ("clr", "clear_sky_fluxes"),
-        "cld":   ("cld", "all_sky_fluxes"),
+        "clear": ("clr", "clearsky_fluxes"),
+        "cloudy":   ("cld", "allsky_fluxes"),
     }
 
     # variable name mapping: nc_name → (out_name, has_lev)
@@ -102,7 +102,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
             fpath = os.path.join(sky_dir, fname)
             if not os.path.exists(fpath):
                 raise FileNotFoundError(f"Missing spectral kernel file: {fpath}")
-            ds = xr.open_dataset(fpath)
+            ds = xr.open_dataset(fpath, chunks="auto")
             # explicitly tag the month (temporary time-like dimension)
             ds = ds.expand_dims(time=[month])
             ds_months.append(ds)
@@ -123,19 +123,21 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
         for vna_local, (vna_out, has_lev) in vnams.items():
             ker = kernels[vna_local]
             if has_lev:
-                ker = ker.rename({"lev": "player"})
+                ker = ker.rename({"lev": "plev"})
             allkers[(tip_out, vna_out)] = ker
 
         # --- pressure levels (once is enough) ---
         if vlevs is None and "lev" in kernels.coords:
-            vlevs = kernels["lev"].rename({"lev": "player"})
+            vlevs = kernels["lev"].rename({"lev": "plev"})
 
     # --- save outputs ---
-    with open(os.path.join(cart_out, "allkers_SPECTRAL.p"), "wb") as f:
-        pickle.dump(allkers, f)
-    with open(os.path.join(cart_out, "vlevs_SPECTRAL.p"), "wb") as f:
-        pickle.dump(vlevs, f)
+    ds_out = xr.Dataset()
 
+    for (tip, vname), da in allkers.items():
+        ds_out[f"{tip}_{vname}"] = da
+    pickle.dump(allkers, open(os.path.join(cart_out, "allkers_SPECTRAL.p"), "wb"))
+    pickle.dump(vlevs, open(os.path.join(cart_out, "vlevs_SPECTRAL.p"), "wb"))
+    
     return allkers
 
 
@@ -1298,11 +1300,10 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     radiation=dict()
     k= allkers[('cld', 't')]
 
+    vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
     if ker=='HUANG':
-        vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
         wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file) 
-    if ker=='ERA5':
-        vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
+
    
     # define suffix for saved files based on method only
     suffix = f"_{method}"
@@ -1376,7 +1377,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         # Average according to method
         if method in ["climatology", "running_m"]:
             dRt_unif = dRt_unif.groupby("time.year").mean("time")
-            dRt_lr = dRt_lr.groupby("time.year").mean("time")
+            dRt_lr = dRt_lr.groupby("time.year").mean("time") 
         else:
             dRt_unif = dRt_unif.mean("month")
             dRt_lr = dRt_lr.mean("month")
@@ -1723,8 +1724,8 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
 
     k=allkers[('cld', 't')]
     radiation=dict()
-    if ker!='SPECTRAL':
-        vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
+    
+    vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
     
     # define suffix for saved files based on method only
     suffix = f"_{method}"
@@ -1933,8 +1934,14 @@ def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
     allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, variable_mapping_file)
+    compute_cfg = config.get("compute", {})
+    compute_albedo = compute_cfg.get("albedo", True)
     print("Variables to consider upload...")
-    allvars = 'ts tas hus alb ta'.split()
+    allvars = 'ts tas hus ta'.split()
+    if compute_albedo:
+        allvars.append('alb')
+    else:
+        print("Config: albedo computation disabled.")
     allvars_c = 'rlutcs rsutcs rlut rsut'.split()
     if all(var in ds.variables for var in allvars_c):
         allvars = allvars + allvars_c  # extend the list
@@ -2076,6 +2083,15 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=N
     # define suffix for saved files based on method only
     suffix = f"_{method}"
 
+    if isinstance(config_file, str):
+        with open(config_file, 'r') as file:
+            config = yaml.safe_load(file)
+    else:
+        config = config_file
+
+    compute_cfg = config.get("compute", {})
+    compute_albedo = compute_cfg.get("albedo", True)
+
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+ suffix +"-"+ker+"kernels.nc")
     if not os.path.exists(path):
@@ -2090,12 +2106,21 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=N
     else:
         anom_pal = xr.open_dataset(path)
     
-    print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
-        anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern)
+    anom_a = None
+    if compute_albedo:
+        print('albedo')
+        path = os.path.join(
+            cart_out,
+            "dRt_albedo_global_clr" + suffix + "-" + ker + "kernels.nc"
+        )
+        if not os.path.exists(path):
+            anom_a = Rad_anomaly_albedo(
+                ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern
+            )
+        else:
+            anom_a = xr.open_dataset(path)
     else:
-        anom_a = xr.open_dataset(path)
+        print("Skipping albedo anomaly (disabled in config).")
     
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+ suffix +"-"+ker+"kernels.nc")
