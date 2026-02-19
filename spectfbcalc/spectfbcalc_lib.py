@@ -702,14 +702,39 @@ def mask_atm(var):
     --------
     mask : xarray.DataArray
         A mask array where:
-        - Values are 1 where the lapse rate (`laps1`) is less than or equal to -2 K/km.
+        - Values are 1 where the lapse rate (`laps`) is less than or equal to -2 K/km.
         - Values are NaN elsewhere.
     """
-    A=(var.plev *100 /var)*(9.81/1005) # 
-    laps1=(var.diff(dim='plev'))*A  #derivata sulla verticale = laspe-rate
+    var=var.mean("time")
+    p=var.plev
+    n=var.sizes['plev']
+    #costanti
+    g=9.81 #gravity
+    cp=1005 #specific heat capacity of air at costant pressure
+    R= 0.2870 #gas costant for dry air
+    k=R/cp
 
-    laps1=laps1.where(laps1<=-2)
-    mask = laps1.notnull().astype(float)
+    result=[]
+    plevs=[]
+    for i in range (0, n-1):
+        lev1_P=(p.isel(plev=i)).item()
+        lev1_T=var.sel(plev= lev1_P)
+        lev2_P=(p.isel(plev=i+1)).item()
+        lev2_T=var.sel(plev= lev2_P)
+        a=(lev2_T-lev1_T)
+        b=((lev2_P*100)**k -(lev1_P*100)**k)
+        c=((lev1_P*100)**k+(lev2_P*100)**k)
+        d=(lev1_T+lev2_T)
+        lapse=(a/b)*(c/d)*(k*g/R)
+    
+        plevs.append(lev1_P)
+        if lev1_P< 70:
+            lapse=lapse.where(lapse<=-2)
+            result.append(lapse)
+        else:
+            result.append(lapse)
+    lapse_da = xr.concat(result, dim="plev").assign_coords(plev=plevs)
+    mask = lapse_da.notnull().astype(float)
     mask = mask.where(mask == 1)
     return mask
 
@@ -801,7 +826,9 @@ def mask_pres(surf_pressure, cart_out:str, allkers, config_file=None):
     else:
         raise TypeError("surf_pressure must be an xarray.Dataset or a path to NetCDF files.")
 
-    psye=check_vertical(psye)
+    psmax = float(psye.max())
+    if psmax > 2000:     # likely Pa
+        psye = psye / 100.0
     psye_rg = ctl.regrid_dataset(psye, k.lat, k.lon).compute()
     wid_mask = np.empty([len(vlevs.plev)] + list(psye_rg.shape))
 
