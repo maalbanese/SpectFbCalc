@@ -1929,14 +1929,9 @@ def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
     allkers = load_kernel_wrapper(ker, config_file)
     print("Dataset to analyze upload...")
     ds = read_data(config_file, variable_mapping_file)
-    compute_cfg = config.get("compute", {})
-    compute_albedo = compute_cfg.get("albedo", True)
     print("Variables to consider upload...")
     allvars = 'ts tas hus ta'.split()
-    if compute_albedo:
-        allvars.append('alb')
-    else:
-        print("Config: albedo computation disabled.")
+    
     allvars_c = 'rlutcs rsutcs rlut rsut'.split()
     if all(var in ds.variables for var in allvars_c):
         allvars = allvars + allvars_c  # extend the list
@@ -2101,21 +2096,12 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=N
     else:
         anom_pal = xr.open_dataset(path)
     
-    anom_a = None
-    if compute_albedo:
-        print('albedo')
-        path = os.path.join(
-            cart_out,
-            "dRt_albedo_global_clr" + suffix + "-" + ker + "kernels.nc"
-        )
-        if not os.path.exists(path):
-            anom_a = Rad_anomaly_albedo(
-                ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern
-            )
-        else:
-            anom_a = xr.open_dataset(path)
+    print('albedo')
+    path = os.path.join(cart_out, "dRt_albedo_global_clr"+ suffix +"-"+ker+"kernels.nc")
+    if not os.path.exists(path):
+        anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern)
     else:
-        print("Skipping albedo anomaly (disabled in config).")
+        anom_a = xr.open_dataset(path)
     
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+ suffix +"-"+ker+"kernels.nc")
