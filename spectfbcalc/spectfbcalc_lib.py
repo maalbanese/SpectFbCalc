@@ -688,7 +688,7 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, method=Non
     return piok
 
 ##tropopause computation (Reichler 2003) 
-def mask_atm(var):
+def mask_str(var):
     """
     Generates a mask for atmospheric temperature data based on the lapse rate threshold.
     as in (Reichler 2003) 
@@ -705,7 +705,6 @@ def mask_atm(var):
         - Values are 1 where the lapse rate (`laps`) is less than or equal to -2 K/km.
         - Values are NaN elsewhere.
     """
-    var=var.mean("time")
     p=var.plev
     n=var.sizes['plev']
     #costanti
@@ -722,20 +721,19 @@ def mask_atm(var):
         lev2_P=(p.isel(plev=i+1)).item()
         lev2_T=var.sel(plev= lev2_P)
         a=(lev2_T-lev1_T)
-        b=((lev2_P*100)**k -(lev1_P*100)**k)
+        b=((lev2_P*100)**k -(lev1_P*100)**k) #*100 bc datas are in hPa
         c=((lev1_P*100)**k+(lev2_P*100)**k)
         d=(lev1_T+lev2_T)
         lapse=(a/b)*(c/d)*(k*g/R)
     
         plevs.append(lev1_P)
-        if lev1_P< 70:
-            lapse=lapse.where(lapse<=-2)
-            result.append(lapse)
-        else:
-            result.append(lapse)
+        result.append(lapse)
     lapse_da = xr.concat(result, dim="plev").assign_coords(plev=plevs)
-    mask = lapse_da.notnull().astype(float)
+    cond = xr.where(lapse_da.plev < 100, lapse_da <= -2, True)
+
+    mask = cond.astype(int).cumprod("plev")
     mask = mask.where(mask == 1)
+
     return mask
 
 ### Mask for surf pressure
@@ -1356,17 +1354,18 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     ts_anom = compute_anomalies(var_ts, piok["ts"], method=method, nonlinear=False, check=True)
 
     if use_atm_mask==True:
-        mask = mask_atm(var)
-        if method not in ["climatology", "running_m"]:
-            mask = mask.groupby("time.month").mean()
-        ta_anom = (ta_anom * mask).interp(plev=vlevs.plev)
+        mask = mask_str(var)
+        if method in ["climatology", "running_m"]:
+            ta_anom = (ta_anom * mask).interp(plev=vlevs.plev)
+        else:
+            ta_anom = (ta_anom * mask.groupby('time.month')).interp(plev=vlevs.plev) #mask in 'time', after * all in time
     else:
         ta_anom = ta_anom.interp(plev=vlevs.plev)
     
-    if method in ["climatology", "running_m"]:
-        anoms_lr = ta_anom - ts_anom
+    if method in ["climatology_mean", "running_m_mean"] and use_atm_mask:
+        anoms_lr = ta_anom.groupby('time.month') - ts_anom
     else:
-        anoms_lr = ta_anom - ts_anom.mean("month")
+        anoms_lr = ta_anom - ts_anom
     anoms_unif = ta_anom - anoms_lr
 
     for tip in ['clr', 'cld']:
@@ -1379,7 +1378,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
             continue  
 
         # Apply kernel first
-        if method in ["climatology_mean", "running_m_mean"]:
+        if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
             #anomalies already averaged over months → just mean over month dimension
             if ker == "HUANG":
                 dRt_unif = (anoms_unif * kernel * wid_mask/100).sum("plev")
@@ -1390,7 +1389,7 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
             if ker == 'SPECTRAL':
                 dRt_unif = (anoms_unif*kernel).sum(dim="plev")
                 dRt_lr = (anoms_lr*kernel).sum(dim="plev")
-        elif method in ["climatology", "running_m"]:
+        else:
             if ker == "HUANG":
                 dRt_unif = (anoms_unif.groupby('time.month') * kernel * wid_mask/100).sum("plev")
                 dRt_lr = (anoms_lr.groupby('time.month') * kernel * wid_mask /100).sum("plev")
@@ -1402,12 +1401,13 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
                 dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="plev")
 
         # Average according to method
-        if method in ["climatology", "running_m"]:
-            dRt_unif = dRt_unif.groupby("time.year").mean("time")
-            dRt_lr = dRt_lr.groupby("time.year").mean("time") 
-        else:
+        if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
             dRt_unif = dRt_unif.mean("month")
             dRt_lr = dRt_lr.mean("month")
+        else:
+            dRt_unif = dRt_unif.groupby("time.year").mean("time")
+            dRt_lr = dRt_lr.groupby("time.year").mean("time") 
+
         
         #Save full dRt pattern before global averaging
         if save_pattern:
@@ -1770,7 +1770,7 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     var = ctl.regrid_dataset(var, k.lat, k.lon)
     var_ta = ctl.regrid_dataset(var_ta, k.lat, k.lon)
     if use_atm_mask==True:
-        mask=mask_atm(var_ta)
+        mask=mask_str(var_ta)
 
     Rv = 461.5 # gas constant of water vapor
     Lv = 2.25e+06 # latent heat of water vapor
@@ -1798,27 +1798,45 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         # nonlinear anomalies (log)
         anoms_ok3 = compute_anomalies( var, piok_hus, method=method, nonlinear=True, check=True)       
         if use_atm_mask==True:
-            anoms_ok3=(anoms_ok3*mask).interp(plev = vlevs.plev)
+            if method in ["climatology", "running_m"]:
+                anoms_ok3=(anoms_ok3*mask).interp(plev = vlevs.plev)
+            else:
+                anoms_ok3 = (anoms_ok3 * mask.groupby('time.month')).interp(plev=vlevs.plev) #mask in 'time', after * all in time
         else:
             anoms_ok3=anoms_ok3.interp(plev = vlevs.plev)
-        coso3 = anoms_ok3 * dlnws(ta_abs_pi)
+        if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
+            coso3 = anoms_ok3 * dlnws(ta_abs_pi)
+        else:
+            coso3 = anoms_ok3.groupby('time.month') * dlnws(ta_abs_pi)
+            
 
     if ker == "ERA5":
         # linear anomalies (x - clim)
         anoms = compute_anomalies(var, piok_hus, method=method, nonlinear=False, check=True)
         if use_atm_mask==True:
-            anoms=(anoms*mask).interp(plev = vlevs.plev)
+            if method in ["climatology", "running_m"]:
+                anoms=(anoms*mask).interp(plev = vlevs.plev)
+            else:
+               anoms=(anoms*mask.groupby('time.month')).interp(plev = vlevs.plev) 
         else:
             anoms=anoms.interp(plev = vlevs.plev)
-        coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
+        if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:    
+            coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
+        else:
+            coso = (anoms.groupby('time.month') / piok_int).groupby('time.month') * (ta_abs_pi**2) * Rv / Lv
+
 
     if ker == "SPECTRAL":
         var_wv = q_to_ppmv(var)
         piok_wv =q_to_ppmv(piok_hus)
         anoms = compute_anomalies(var_wv, piok_wv, method=method, nonlinear=False, check=True)
-        anoms=(anoms*mask).interp(plev = vlevs.plev)
-
-
+        if use_atm_mask==True:
+            if method in ["climatology", "running_m"]:
+                anoms=(anoms*mask).interp(plev = vlevs.plev)
+            else:
+               anoms=(anoms*mask.groupby('time.month')).interp(plev = vlevs.plev) 
+        else:
+            anoms=anoms.interp(plev = vlevs.plev)
 
     for tip in ['clr','cld']: 
         if ker != 'SPECTRAL':
@@ -1830,31 +1848,33 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
             kernel= kernel_lw
         
         if ker=='HUANG':
-            if method in ["climatology", "running_m"]:
-                dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('plev').groupby('time.year').mean('time')
-                dRt_lw = (coso3.groupby('time.month')* kernel_lw* wid_mask/100).sum('plev').groupby('time.year').mean('time')
-                dRt_sw = (coso3.groupby('time.month')* kernel_sw* wid_mask/100).sum('plev').groupby('time.year').mean('time')
-            else:
+            if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
                 dRt = (coso3* kernel* wid_mask/100).sum('plev').mean('month')
                 dRt_lw = (coso3* kernel_lw* wid_mask/100).sum('plev').mean('month')
                 dRt_sw = (coso3* kernel_sw* wid_mask/100).sum('plev').mean('month')
+            else:
+                dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('plev').groupby('time.year').mean('time')
+                dRt_lw = (coso3.groupby('time.month')* kernel_lw* wid_mask/100).sum('plev').groupby('time.year').mean('time')
+                dRt_sw = (coso3.groupby('time.month')* kernel_sw* wid_mask/100).sum('plev').groupby('time.year').mean('time')
+
 
         if ker=='ERA5':
-            if method in ["climatology", "running_m"]:
-                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
-                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
-                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
-            
-            else:
+            if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
                 dRt = (coso*( kernel* vlevs.dp/100)).sum('plev').mean('month')
                 dRt_lw = (coso*( kernel_lw* vlevs.dp/100)).sum('plev').mean('month')
                 dRt_sw = (coso*( kernel_sw* vlevs.dp/100)).sum('plev').mean('month')
+            else:
+                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
+                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
+                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
+
 
         if ker=='SPECTRAL':
-            if method in ["climatology", "running_m"]:
-                dRt= (anoms.groupby('time.month')*kernel).sum(dim="plev").groupby('time.year').mean('time')
-            else:
+            if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
                 dRt = (anoms*kernel).sum(dim="plev").mean('month')
+            else:
+                dRt= (anoms.groupby('time.month')*kernel).sum(dim="plev").groupby('time.year').mean('time')
+                
                 
         #Save full dRt pattern before global averaging
         if save_pattern:
