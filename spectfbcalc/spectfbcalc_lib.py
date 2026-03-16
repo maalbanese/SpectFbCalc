@@ -71,9 +71,6 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
         Each value is an xarray DataArray with dimension `month`.
     """
 
-    import os
-    import pickle
-    import xarray as xr
 
     # mapping: filename tag → (output tag, subdirectory)
     tips = {
