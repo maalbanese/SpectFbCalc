@@ -2442,6 +2442,11 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, me
         "fb_pattern": fb_pattern if save_pattern else None,
     }
 
+def calc_inter(ds, running_years):
+    med = ctl.running_mean(ds, running_years)
+    trend=ds-med
+    return trend
+
 def calc_fb_interannual_wrapper(config_file: str, ker, variable_mapping_file: str):
     """
     Wrapper function for computing interannual radiative and cloud feedbacks.
@@ -2687,8 +2692,7 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
     anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, nonlinear=False, check=True) 
     
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
-    trend = ctl.running_mean(gtas, running_years)
-    temp=gtas-trend
+    temp= calc_inter(gtas, running_years)
 
     if save_pattern:
         fb_pattern = {}
@@ -2699,8 +2703,7 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
             feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ suffix +"-"+ker+"kernels.nc",  use_cftime=True)
-            trend_fed=ctl.running_mean(feedbacks, running_years)
-            inter=feedbacks-trend_fed
+            inter=calc_inter(feedbacks, running_years)
 
             res = stats.linregress(temp,inter)
             fb_coef[(tip, fbn)] = res
@@ -2708,8 +2711,7 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
                 feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+suffix+"-"+ker+"kernels.nc", use_cftime=True)
-                trend_patt=ctl.running_mean(feedbacks_pattern, running_years)
-                feedbacks_pattern_dec=feedbacks_pattern-trend_patt                
+                feedbacks_pattern_dec=calc_inter(feedbacks_pattern, running_years)              
 
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
                 gtas1 = temp.chunk({'year': -1})
@@ -2921,16 +2923,16 @@ def feedback_cloud_interannual(ds, piok, fb_coef, surf_anomaly, time_range=None,
     N0 = N0.groupby('time.year').mean('time')
 
     crf_glob = ctl.global_mean(crf).compute()
-    trend_crf_glob = ctl.running_mean(crf_glob, running_years)
+    trend_crf_glob = calc_inter(crf_glob, running_years)
     N_glob = ctl.global_mean(N).compute()
-    trend_N_glob = ctl.running_mean(N_glob, running_years)
+    trend_N_glob = calc_inter(N_glob, running_years)
     N0_glob = ctl.global_mean(N0).compute()
-    trend_N0_glob = ctl.running_mean(N0_glob, running_years)
+    trend_N0_glob = calc_inter(N0_glob, running_years)
     
 
-    res_N = stats.linregress(surf_anomaly, (N_glob-trend_N_glob))
-    res_N0 = stats.linregress(surf_anomaly, (N0_glob-trend_N0_glob))
-    res_crf = stats.linregress(surf_anomaly, (crf_glob-trend_crf_glob))
+    res_N = stats.linregress(surf_anomaly, trend_N_glob)
+    res_N0 = stats.linregress(surf_anomaly, trend_N0_glob)
+    res_crf = stats.linregress(surf_anomaly, trend_crf_glob)
 
     F0 = res_N0.intercept + piok[('rlutcs')] + piok[('rsutcs')] 
     F = res_N.intercept + piok[('rlut')] + piok[('rsut')]
