@@ -599,7 +599,7 @@ def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers
     return piok
 
 
-def climatology(ds_ref,  allkers, var_name, time_range=None, method=None, time_chunk=12, use_log_wv = False):
+def climatology(ds_ref,  allkers, var_name, time_range=None, method=None, time_chunk=12, use_log_wv = False, log_clim = False):
     """
     Computes the preindustrial (PI) climatology or running mean for a given variable or set of variables.
     The function handles the loading and processing of kernels (either HUANG or ERA5) and calculates the PI climatology
@@ -647,8 +647,9 @@ def climatology(ds_ref,  allkers, var_name, time_range=None, method=None, time_c
         var = var.sel(time=slice(time_range['start'], time_range['end']))
 
     if var_name == 'hus' and use_log_wv: 
-        print('Using log for hus climatology')
-        var = np.log(var)
+        if log_clim:
+            print('Using log for hus climatology')
+            var = np.log(var)
 
     if method in ["climatology", "climatology_mean"]:
         var_mean = var.groupby('time.month').mean()
@@ -884,7 +885,7 @@ def regress_pattern_vectorized(feedback_data, gtas):
     return slope, stderr
 
 ############ ANOMALY PREPROCESSING FUNCTION #############
-def compute_anomalies(var, clim, method="climatology", use_log_wv=False, check=False):
+def compute_anomalies(var, clim, method="climatology", use_log_wv=False, check=False, log_clim = True):
     """
     Compute anomalies between a variable and its climatology/reference.
 
@@ -912,7 +913,10 @@ def compute_anomalies(var, clim, method="climatology", use_log_wv=False, check=F
     """
     # choose linear or use_log_wv subtraction
     if use_log_wv:
-        func = lambda x, c: np.log(x) - c
+        if log_clim:
+            func = lambda x, c: np.log(x) - c
+        else:
+            func = lambda x, c: np.log(x) - np.log(c)
     else:
         func = lambda x, c: x - c
 
