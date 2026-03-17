@@ -412,11 +412,55 @@ def read_data(config_file: str, variable_mapping_file: str = "configvariable.yml
         ds_list.append(xr.open_mfdataset(file_pathpl, combine='by_coords', use_cftime=True,  chunks={'time': time_chunk}))
 
     # Merge dataset
+    print('Now merging')
     ds = xr.merge(ds_list, compat="override")
+    print(ds)
+
+    # time_bnds  (time, bnds) object 32kB dask.array<chunksize=(12, 2), meta=np.ndarray>
+    # lat_bnds   (time, lat, bnds) float64 8MB dask.array<chunksize=(12, 256, 2), meta=np.ndarray>
+    # lon_bnds   (time, lon, bnds) float64 16MB dask.array<chunksize=(12, 512, 2), meta=np.ndarray>
+    # hus        (time, plev, lat, lon) float32 20GB dask.array<chunksize=(12, 10, 128, 256), meta=np.ndarray>
+    # prsn       (time, lat, lon) float32 1GB dask.array<chunksize=(12, 256, 512), meta=np.ndarray>
+    # psl        (time, lat, lon) float32 1GB dask.array<chunksize=(12, 256, 512), meta=np.ndarray>
+    # ...         ...
+    # rsus       (time, lat, lon) float32 1GB dask.array<chunksize=(12, 256, 512), meta=np.ndarray>
+    # rsut       (time, lat, lon) float32 1GB dask.array<chunksize=(12, 256, 512), meta=np.ndarray>
+    # rsutcs     (time, lat, lon) float32 1GB dask.array<chunksize=(12, 256, 512), meta=np.ndarray>
+    # ta         (time, plev, lat, lon) float32 20GB dask.array<chunksize=(12, 10, 128, 256), meta=np.ndarray>
+    # tas        (time, lat, lon) float32 1GB dask.array<chunksize=(12, 256, 512), meta=np.ndarray>
+    # ts         (time, lat, lon) float32 1GB dask.array<chunksize=(12, 256, 512), meta=np.ndarray>
 
     ds = standardize_names(ds, dataset_type, variable_mapping_file)
+    # check_lazy_loading(ds)
 
     return ds
+
+
+def check_lazy_loading(ds):
+    """Quick diagnostic for lazy loading status"""
+    import dask.array as da
+    
+    print("=== Lazy Loading Status ===")
+    for var in ds.data_vars:
+        is_lazy = isinstance(ds[var].data, da.Array)
+        status = "✓ Lazy" if is_lazy else "✗ LOADED"
+        if is_lazy:
+            size_mb = ds[var].nbytes / 1e6
+            n_chunks = ds[var].data.npartitions
+            print(f"{var:20s} {status:10s} ({size_mb:8.1f} MB, {n_chunks:4d} chunks)")
+        else:
+            print(f"{var:20s} {status:10s}")
+
+    try:
+        print(f"\nChunk structure:\n{ds.chunks}")
+    except ValueError as err:
+        print('Problem with chunks!')
+        print(err)
+        ds = xr.unify_chunks(ds)
+        print(f"\nChunk structure:\n{ds.chunks}")
+
+    return
+
 
 def load_variable_mapping(configvar_file, dataset_type):
     """Load variable mappings for the specified dataset type from YAML."""
@@ -489,7 +533,7 @@ def preproc(ds):
 
 ######################################################################################
 #### Aux functions
-def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers=None):
+def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers=None, use_log_wv = False):
     """
     Computes the reference climatology using the provided configuration, variables, and kernel data.
 
@@ -550,11 +594,12 @@ def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers
     piok = {} 
     for vnams in allvars:
         clim_method = "climatology" if vnams in ['rsut', 'rlut', 'rsutcs', 'rlutcs'] else method
-        piok[vnams] = climatology(ds_ref, allkers, vnams, time_range_clim, clim_method, time_chunk)
+        piok[vnams] = climatology(ds_ref, allkers, vnams, time_range_clim, clim_method, time_chunk, use_log_wv = use_log_wv)
 
     return piok
 
-def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, method=None, time_chunk=12):
+
+def climatology(ds_ref,  allkers, var_name, time_range=None, method=None, time_chunk=12, use_log_wv = False):
     """
     Computes the preindustrial (PI) climatology or running mean for a given variable or set of variables.
     The function handles the loading and processing of kernels (either HUANG or ERA5) and calculates the PI climatology
@@ -562,14 +607,10 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, method=Non
     or climate diagnostics.
     Parameters:
     -----------
-    filin_pi : str
-        Template path for the preindustrial data NetCDF files, with a placeholder for the variable name.
-        Example: `'/path/to/files/{}_data.nc'`.
-    cart_k : str
-        Path to the directory containing kernel dataset files.
+    ds_ref : the reference dataset
     allkers  : dict
         Dictionary containing radiative kernels for different conditions (e.g., 'clr', 'cld').
-    allvars : str
+    var_name : str
         The variable name(s) to process. For example, `'alb'` for albedo or specific flux variables
         (e.g., `'rsus'`, `'rsds'`).
     method : {"climatology", "running_m", "climatology_mean", "running_m_mean"}, default "climatology"
@@ -595,59 +636,27 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, method=Non
         k = allkers[('cld', 't')]
     else:
         print(f"Key ('cld', 't') not found in allkers")
-        k = None  
-    pimean = dict()
-
-    if allvars == 'alb':
-        allvar = ['rsus', 'rsds']
+        k = None
+    
+    if var_name == 'alb' and 'alb' not in ds_ref:
+        ds_ref['alb'] = ds_ref['rsus'] / ds_ref['rsds']
+    
+    var = ds_ref[var_name]
         
-        for vnam in allvar:
-            if isinstance(filin_pi, str):  # 1: path ai file
-                filist = glob.glob(filin_pi.format(vnam))
-                filist.sort()
-                var = xr.open_mfdataset(filist, chunks={'time': time_chunk}, use_cftime=True)
-            elif isinstance(filin_pi, xr.Dataset):  # 2: dataset già caricato
-                var = filin_pi[vnam]
-            else:
-                raise ValueError("filin_pi must to be a string path or an xarray.Dataset")
+    if time_range is not None:
+        var = var.sel(time=slice(time_range['start'], time_range['end']))
 
-            if time_range is not None:
-                var = var.sel(time=slice(time_range['start'], time_range['end']))
+    if var_name == 'hus' and use_log_wv: 
+        print('Using log for hus climatology')
+        var = np.log(var)
 
-            if method in ["climatology", "climatology_mean"]:
-                var_mean = var.groupby('time.month').mean()
-                var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
-                pimean[vnam] = var_mean
-            else:
-                pimean[vnam] = ctl.regrid_dataset(var, k.lat, k.lon)
-
-        piok = pimean['rsus'] / pimean['rsds']
-        if method in ["running_m", "running_m_mean"]:
-            piok = ctl.running_mean(piok, 252)
-
+    if method in ["climatology", "climatology_mean"]:
+        var_mean = var.groupby('time.month').mean()
+        var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
+        piok = var_mean
     else:
-        if isinstance(filin_pi, str):  # 1: path ai file
-            filist = glob.glob(filin_pi.format(allvars))
-            filist.sort()
-            var = xr.open_mfdataset(filist, chunks={'time': time_chunk}, use_cftime=True)
-        elif isinstance(filin_pi, xr.Dataset):  # 2: dataset già caricato
-            var = filin_pi[allvars]
-        else:
-            raise ValueError("filin_pi must to be a string path or an xarray.Dataset")
-
-        if time_range is not None:
-            var = var.sel(time=slice(time_range['start'], time_range['end']))
-
-        #if time_range is not None:
-            #var = var.sel(time=slice(time_range[0], time_range[1]))
-
-        if method in ["climatology", "climatology_mean"]:
-            var_mean = var.groupby('time.month').mean()
-            var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
-            piok = var_mean
-        else:
-            piok = ctl.regrid_dataset(var, k.lat, k.lon)
-            piok = ctl.running_mean(piok, 252)
+        piok = ctl.regrid_dataset(var, k.lat, k.lon)
+        piok = ctl.running_mean(piok, 252)
 
     return piok
 
@@ -875,7 +884,7 @@ def regress_pattern_vectorized(feedback_data, gtas):
     return slope, stderr
 
 ############ ANOMALY PREPROCESSING FUNCTION #############
-def compute_anomalies(var, clim, method="climatology", nonlinear=False, check=False):
+def compute_anomalies(var, clim, method="climatology", use_log_wv=False, check=False):
     """
     Compute anomalies between a variable and its climatology/reference.
 
@@ -891,7 +900,7 @@ def compute_anomalies(var, clim, method="climatology", nonlinear=False, check=Fa
         - "running_m"              : 21-years running mean climatology to calculate the anomaly 
         - "climatology_mean"       : anomaly is computed as a single averaged value over the time dimension
         - "running_m_mean"         : anomaly is computed as a single averaged value over the time dimension
-    nonlinear : bool, default False
+    use_log_wv : bool, default False
         If True, apply log-difference instead of linear subtraction.
     check : bool, default False
         If True, perform check_data(var, clim) before computing anomalies.
@@ -901,9 +910,9 @@ def compute_anomalies(var, clim, method="climatology", nonlinear=False, check=Fa
     xr.DataArray
         Anomalies
     """
-    # choose linear or nonlinear subtraction
-    if nonlinear:
-        func = lambda x, c: np.log(x) - np.log(c)
+    # choose linear or use_log_wv subtraction
+    if use_log_wv:
+        func = lambda x, c: np.log(x) - c
     else:
         func = lambda x, c: x - c
 
@@ -1078,7 +1087,7 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, time_range=None, m
     var = ctl.regrid_dataset(var, k.lat, k.lon)
   
     # Anomaly computation (always linear here)
-    anoms = compute_anomalies(var, piok['ts'], method=method, nonlinear=False, check=True)
+    anoms = compute_anomalies(var, piok['ts'], method=method, use_log_wv=False, check=True)
  
     for tip in ['clr', 'cld']:
         print(f"Processing {tip}")  
@@ -1287,8 +1296,8 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
         var_ts = ctl.regrid_dataset(var_ts, k.lat, k.lon)
 
     # Anomaly computation (always linear here)
-    ta_anom = compute_anomalies(var, piok["ta"], method=method, nonlinear=False, check=True)
-    ts_anom = compute_anomalies(var_ts, piok["ts"], method=method, nonlinear=False, check=True)
+    ta_anom = compute_anomalies(var, piok["ta"], method=method, use_log_wv=False, check=True)
+    ts_anom = compute_anomalies(var_ts, piok["ts"], method=method, use_log_wv=False, check=True)
 
     if use_atm_mask==True:
         mask = mask_atm(var)
@@ -1507,7 +1516,7 @@ def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, time_range=None, method
     var = var.where(var > 0., 0.)
 
     # Anomaly computation (always linear here)
-    anoms = compute_anomalies(var, piok, method=method, nonlinear=False, check=True)
+    anoms = compute_anomalies(var, piok, method=method, use_log_wv=False, check=True)
 
     for tip in [ 'clr','cld']:
         kernel = allkers[(tip, 'alb')]
@@ -1615,9 +1624,13 @@ def Rad_anomaly_wv_wrapper(config_file: str, ker, variable_mapping_file: str):
             surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
         else:
             print("Using surface pressure passed as an array.")
+        
+    use_log_wv = False
+    if ker in ['HUANG']:
+        use_log_wv = True       
 
     print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config, allvars, ker, variable_mapping_file, allkers=allkers) 
+    ref_clim_data = ref_clim(config, allvars, ker, variable_mapping_file, allkers=allkers, use_log_wv = use_log_wv)
 
     print("Water-Vapour radiative anomaly computing...")
     radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, config, method, use_atm_mask, save_pattern)
@@ -1727,21 +1740,21 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
         vlevs = pickle.load(open(cart_out + f"vlevs_{ker}.p", "rb"))
         wid_mask = mask_pres(surf_pressure, cart_out, allkers, config_file)
 
-        # nonlinear anomalies (log)
-        anoms_ok3 = compute_anomalies( var, piok_hus, method=method, nonlinear=True, check=True)
+        # use_log_wv anomalies (log)
+        anoms_ok3 = compute_anomalies( var, piok_hus, method=method, use_log_wv=True, check=True)
         anoms_ok3 = (anoms_ok3*mask).interp(plev = cose)            
         coso3 = anoms_ok3 * dlnws(ta_abs_pi)
 
     if ker == "ERA5":
         # linear anomalies (x - clim)
-        anoms = compute_anomalies(var, piok_hus, method=method, nonlinear=False, check=True)
+        anoms = compute_anomalies(var, piok_hus, method=method, use_log_wv=False, check=True)
         anoms = (anoms*mask).interp(plev = cose)  
         coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
 
     if ker == "SPECTRAL":
         var_wv = q_to_ppmv(var_int)
         piok_wv =q_to_ppmv(piok_int)
-        anoms = compute_anomalies(var_wv, piok_wv, method=method, nonlinear=False, check=True)
+        anoms = compute_anomalies(var_wv, piok_wv, method=method, use_log_wv=False, check=True)
 
 
     for tip in ['clr','cld']: 
@@ -1811,7 +1824,7 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     return radiation
 
 #ALL RAD_ANOM COMPUTATION
-def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
+def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str, force_recompute = False):
     """
     High-level wrapper for computing radiative anomaly components using
     multiple kernel types and flexible configuration settings.
@@ -1930,14 +1943,18 @@ def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
         else:
             print("Using surface pressure passed as an array.")
 
+    use_log_wv = False
+    if ker in ['HUANG']:
+        use_log_wv = True     
+
     print("Upload reference climatology for Rad anomaly...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers) 
+    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers, use_log_wv = use_log_wv) 
     
-    anom_ps, anom_pal, anom_a, anom_wv = calc_anoms(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern)
+    anom_ps, anom_pal, anom_a, anom_wv = calc_anoms(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, force_recompute = force_recompute)
 
     return (anom_ps, anom_pal, anom_a, anom_wv)
 
-def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False):
+def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False, force_recompute = False):
     """
     Computes radiative anomalies for multiple feedback components using
     precomputed kernels.
@@ -2025,30 +2042,34 @@ def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=N
 
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
+    if not os.path.exists(path) or force_recompute:
         anom_ps = Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern)
     else:
+        print(f'Reading already computed anomaly from {path}')
         anom_ps = xr.open_dataset(path)
     
     print('planck atm')
     path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
+    if not os.path.exists(path) or force_recompute:
         anom_pal = Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range, config_file, method, use_atm_mask, save_pattern)
     else:
+        print(f'Reading already computed anomaly from {path}')
         anom_pal = xr.open_dataset(path)
     
     print('albedo')
     path = os.path.join(cart_out, "dRt_albedo_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
+    if not os.path.exists(path) or force_recompute:
         anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern)
     else:
+        print(f'Reading already computed anomaly from {path}')
         anom_a = xr.open_dataset(path)
     
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
+    if not os.path.exists(path) or force_recompute:
         anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range, config_file, method, use_atm_mask, save_pattern)
     else:
+        print(f'Reading already computed anomaly from {path}')
         anom_wv = xr.open_dataset(path)  
 
     return anom_ps, anom_pal, anom_a, anom_wv 
@@ -2284,7 +2305,7 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, me
     else:
         var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon) 
 
-    anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, nonlinear=False, check=True)
+    anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, use_log_wv=False, check=True)
 
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
@@ -2580,7 +2601,7 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
     else:
         var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon)
 
-    anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, nonlinear=False, check=True) 
+    anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, use_log_wv=False, check=True) 
     
     gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
     trend = ctl.running_mean(gtas, running_years)
