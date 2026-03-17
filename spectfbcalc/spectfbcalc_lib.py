@@ -26,6 +26,7 @@ import yaml
 from difflib import get_close_matches
 import dask
 import psutil
+from xarray import unify_chunks
 
 
 
@@ -578,10 +579,12 @@ def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers
         print("Using pre-loaded kernels.")
 
     if isinstance(allvars, str):
-        allvars = [allvars]
+        vars_to_process = [allvars]
+    else:
+        vars_to_process = allvars.copy() 
 
     piok = {} 
-    for vnams in allvars:
+    for vnams in vars_to_process:
         clim_method = "climatology" if vnams in ['rsut', 'rlut', 'rsutcs', 'rlutcs'] else method
         piok[vnams] = climatology(ds_ref, allkers, vnams, time_range_clim, clim_method, time_chunk)
 
@@ -631,7 +634,15 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, method=Non
         k = None  
     pimean = dict()
 
+    import glob
+    alb_exists = False
     if allvars == 'alb':
+        if isinstance(filin_pi, str):
+            alb_exists = bool(glob.glob(filin_pi.format('alb')))
+        elif isinstance(filin_pi, xr.Dataset):
+            alb_exists = 'alb' in filin_pi
+
+    if allvars == 'alb' and not alb_exists:
         allvar = ['rsus', 'rsds']
         
         for vnam in allvar:
@@ -657,6 +668,7 @@ def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, method=Non
         piok = pimean['rsus'] / pimean['rsds']
         if method in ["running_m", "running_m_mean"]:
             piok = ctl.running_mean(piok, 252)
+        return piok
 
     else:
         if isinstance(filin_pi, str):  # 1: path ai file
@@ -967,6 +979,9 @@ def compute_anomalies(var, clim, method="climatology", nonlinear=False, check=Fa
     else:
         func = lambda x, c: x - c
 
+    if hasattr(var, "chunks") or hasattr(clim, "chunks"):
+        var, clim = unify_chunks(var, clim)
+
     if method == "climatology":
         # group anomalies by month (climatology already grouped by month)
         return xr.apply_ufunc(func, var.groupby("time.month"), clim, dask="allowed")
@@ -977,7 +992,6 @@ def compute_anomalies(var, clim, method="climatology", nonlinear=False, check=Fa
         # broadcast climatology to full time axis
         clim_aligned = clim.drop("time")
         clim_aligned["time"] = var["time"]
-        clim_aligned = clim_aligned.chunk(var.chunks)
         return xr.apply_ufunc(func, var, clim_aligned, dask="allowed")
 
     elif method == "climatology_mean":
@@ -985,13 +999,11 @@ def compute_anomalies(var, clim, method="climatology", nonlinear=False, check=Fa
         return xr.apply_ufunc(func, var.groupby("time.month").mean(), clim, dask="allowed")
 
     elif method == "running_m_mean":
-        if check:
+        if check: 
             check_data(var, clim)
-        # broadcast climatology to full time axis
-        clim_aligned = clim.drop("time")
+         # broadcast climatology to full time axis
+        clim_aligned = clim.drop_vars("time", errors="ignore")
         clim_aligned["time"] = var["time"]
-        clim_aligned = clim_aligned.chunk(var.chunks)
-        # anomalies of mean seasonal cycle, both monthly-averaged
         return xr.apply_ufunc(
             func,
             var.groupby("time.month").mean(),
@@ -1555,26 +1567,30 @@ def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, time_range=None, method
     # define suffix for saved files based on method only
     suffix = f"_{method}"
 
-    var_rsus= ds['rsus']
-    var_rsds=ds['rsds'] 
+    if 'alb' in ds:
+        print("Variable 'alb' found in dataset. Using it directly...")
+        var = ds['alb']
+    elif 'rsus' in ds and 'rsds' in ds:
+        print("Variable 'alb' not found. Calculating from rsus/rsds...")
+        var = ds['rsus'] / ds['rsds']
+    else:
+        raise KeyError(f"Neither 'alb' nor 'rsus'/'rsds' variables found in the dataset. Please check your dataset and variable mapping. "
+                       f"Available variables: {list(ds.data_vars)}")
 
-    # n_zeros = (var_rsds == 0).sum().compute()
-    # print(f"Warning: {n_zeros} zeros rds values!")
-    # var_rsds_safe = xr.where(var_rsds == 0, np.nan, var_rsds)
-
-    var = var_rsus/var_rsds #or var_rsds_safe 
     var = var.fillna(0)
+    var = var.where(var < 10, 0)
 
     if time_range is not None:
         var = var.sel(time=slice(time_range['start'], time_range['end']))
     var = ctl.regrid_dataset(var, k.lat, k.lon)
 
     # Removing inf and nan from alb
-    piok = piok['alb'].where(piok['alb'] > 0., 0.)
+    piok_var = piok['alb'] if 'alb' in piok else piok
+    piok_var = piok_var.where(piok_var > 0., 0.)
     var = var.where(var > 0., 0.)
 
     # Anomaly computation (always linear here)
-    anoms = compute_anomalies(var, piok, method=method, nonlinear=False, check=True)
+    anoms = compute_anomalies(var, piok_var, method=method, nonlinear=False, check=True)
 
     for tip in [ 'clr','cld']:
         kernel = allkers[(tip, 'alb')]
@@ -1975,6 +1991,15 @@ def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
     ds = read_data(config_file, variable_mapping_file)
     print("Variables to consider upload...")
     allvars = 'ts tas hus ta'.split()
+
+    if 'alb' in ds.variables:
+        allvars.append('alb')
+        print("Albedo (alb) detected in experiment dataset.")
+    elif 'rsus' in ds.variables and 'rsds' in ds.variables:
+        allvars.append('alb')
+        print("Albedo will be computed from rsus/rsds in experiment dataset.")
+    else:
+        print("Warning: Albedo variables not found in experiment dataset. Skipping albedo feedback.")
     
     allvars_c = 'rlutcs rsutcs rlut rsut'.split()
     if all(var in ds.variables for var in allvars_c):
