@@ -881,7 +881,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     
     # load picontrol (+ remap)
     print('\n -------> Loading control')
-    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = variables, variable_mapping = config['variable_mapping'])
+    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'])
 
     if control.check_remapped():
         control.load_remapped()
@@ -890,12 +890,12 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
         control.load_raw()
         control.remap(target_ds = k, save_remapped = True)
     
-    control.check_vars()
+    control.check_vars(variables = variables)
     control.vertical_interp(k)
 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
-    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = variables, variable_mapping = config['variable_mapping'])
+    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'])
     if experiment.check_remapped():
         experiment.load_remapped()
     else:
@@ -903,7 +903,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
         experiment.load_raw()
         experiment.remap(target_ds = k, save_remapped = True)
 
-    experiment.check_vars()
+    experiment.check_vars(variables = variables)
     experiment.vertical_interp(k)
 
     # compute climatology and anomaly
