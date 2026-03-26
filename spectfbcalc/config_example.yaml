@@ -1,34 +1,26 @@
-#ece3 or ece4:
-dataset_type: #specify model version: ece3 or ece4
 kernels:
-    era5:
+    ERA5:
       path_input: "/path/to/kernels/Huang_ERA5/"
-      path_output: "/path/to/kernels/output/"
       filename_template: "ERA5_kernel_{}_TOA.nc"
-    huang:
+    HUANG:
       path_input: "/path/to/kernels/Huang/toa/"
-      path_output: "/path/to/kernels/output/"
       filename_template: "RRTMG_{}_toa_{}_highR.nc"
-    spect:
+    SPECTRAL:
       path_input: "/path/to/kernels/spectral/toa/"
-      path_output: "/path/to/kernels/output/"
-      filename_template: "spectral_{}_kernel_longwave_{}.nc" 
-
+   
 file_paths:
    reference_dataset: "/path/to/reference_data/"
-   reference_dataset_pl: "/path/to/reference_data/level_pressure" #to use if vertical data are separate from others
    experiment_dataset: "/path/to/experiment_data/"
-   experiment_dataset2: "" #if you need a second experiment dataset, specify it here 
-   experiment_dataset_pl: "/path/to/experiment_data/level_pressure" #to use if vertical data are separate from others
    pressure_data: "" #to specify if you have ps values in a different file and not in an array
    output: "/path/to/output/"
 
+exp_name: "model_1"
+
 anomaly_method: "" #specify the anomaly method: climatology, running_m, climatology_mean, running_m_mean
-use_atm_mask: True
 save_pattern: False
 num_year_regr: 10 #number of years to group for regression
 num_running_years_trend: 25 #number of years to group for running trend
-time_range: #this is the time range for the reference dataset 
+time_range_clim: #this is the time range for the reference dataset 
    start: ""
    end: ""
 time_range_exp: #this is the time range for the experiment dataset, give it empty if you want to use the same as the reference dataset

@@ -33,6 +33,7 @@ from cdo import Cdo
 
 ######################################################################
 ### Functions 
+time_coder = xr.coders.CFDatetimeCoder(use_cftime = True)
 
 STD_VARS = {"hus", "rlut", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 STD_VARS_LOGQ = {"hus_log", "rlut", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
@@ -47,23 +48,100 @@ def regrid(ds, target_ds):
     coso.name = ds.name
     return coso
 
+
+class Kernel:
+    """
+    Loads the kernels and the additional information needed.  
+    
+    ----------
+    name : one among "HUANG", "ERA5", "SPECTRAL"
+    """
+ 
+    def __init__(self, name, config = None, path_input = None, filename_template = None) -> None:
+        if name not in ['HUANG', 'ERA5', 'SPECTRAL']:
+            raise ValueError(f'kernel name {name} not supported')
+            
+        self.name = name
+        if config is not None:
+            self.cart_k = config['kernels'][name]['path_input']
+            self.filename_template = config['kernels'][name]['filename_template']
+        else:
+            if path_input is None: raise ValueError(f"config is None and path_input not provided for kernel {self.name}")
+            if filename_template is None: raise ValueError(f"config is None and filename_template not provided for kernel {self.name}")
+            self.cart_k = path_input
+            self.filename_template = filename_template
+
+        print(f"Loading kernel: {name}")
+        self.kernel, self.dp = load_kernel(self.name, self.cart_k, finam = self.filename_template)
+
+        self.use_log_wv = False
+        if self.name in ['HUANG']: # Add here other kernels that need hus_log
+            self.use_log_wv = True
+
+        if self.name in ['HUANG', 'ERA5']:
+            self.dp = self.dp/100. # in units of 100 hPa
+
+
+    def recompute_dp(self, experiment) -> None:
+        """
+        Recomputes the atmospheric layers based on the model's surface pressure.
+
+        experiment is an Experiment instance
+        """
+
+        if "surf_pressure" not in experiment.ds:
+            print(f"Surface pressure not available in experiment {experiment.name}, using default dp for kernel {self.name}")
+            return
+
+        if self.dp is None:
+            raise ValueError(f"Cannot recompute dp for kernel {self.name}: dp not available")
+            
+        # Surface mask
+        wid_mask = np.empty([len(self.dp.plev)] + list(experiment.surf_pressure.shape))
+        
+        for ila in range(len(experiment.surf_pressure.lat)):
+            for ilo in range(len(experiment.surf_pressure.lon)):
+                ind = np.where((experiment.surf_pressure[ila, ilo].values - self.dp.plev.values) > 0)[0][0]
+                wid_mask[:ind, ila, ilo] = np.nan
+                wid_mask[ind, ila, ilo] = experiment.surf_pressure[ila, ilo].values - self.dp.plev.values[ind]
+                wid_mask[ind+1:, ila, ilo] = self.dp.values[ind+1:]
+
+        k = self.kernel[('clr', 't')]
+        wid_mask = xr.DataArray(wid_mask, dims = k.dims[1:], coords = k.drop('month').coords)
+
+        if self.name in ['HUANG', 'ERA5']:
+            self.dp = wid_mask/100. # in units of 100 hPa
+        else:
+            self.dp = wid_mask
+
+
+    def __repr__(self) -> str:
+        return (
+            f"Kernel(\n"
+            f"  name      = {self.name!r}\n"
+            f"  cart_k = {self.cart_k}\n"
+            f"  available kernels = {self.kernel.keys()}\n"
+            f")"
+        )
+
  
 class Experiment:
     """
     Loads the data of a specific experiment.  
     
     ----------
-    exp_type : str
-        Can be "PI", "4x", "hist", "amip", "1pct"
+    name : str
+        An identifying name for the experiment (e.g. {model}_{member}_{exp_type})
     variables : set[str]
         Climate variable names tracked by this instance.
     dataset : xr.Dataset
         Merged lazy dataset of remapped data populated by `load_remapped`.
     """
  
-    def __init__(self, exp_type, orig_dir, remap_dir = "remapped", raw_variables = STD_VARS_NOALB, time_chunk = 20, variable_mapping = None) -> None:
-        self.exp_type: str = exp_type
+    def __init__(self, name, orig_dir, remap_dir = "remapped", raw_variables = STD_VARS_NOALB, time_chunk = 20, variable_mapping = None) -> None:
+        self.name: str = name
         self.raw_variables: set[str] | list[str] | tuple[str] = raw_variables
+        
         self.orig_dir: Path = Path(orig_dir)
         self.remap_dir: Path = Path(remap_dir)
 
@@ -79,17 +157,29 @@ class Experiment:
         self.load_file_dict()
         self.raw_data = dict()
         self.ds = xr.Dataset()
+        self.ds_anom = xr.Dataset()
+        self.ds_clim = xr.Dataset()
  
     # ------------------------------------------------------------------
     # 1. Lazy loading of raw DataArrays
     # ------------------------------------------------------------------
     def load_file_dict(self):
-        file_dict = {
-                var: sorted(self.orig_dir.glob(f"{self.variable_mapping[var]}/{self.variable_mapping[var]}*.nc")) # does not work with **/* with symlinks!
-                for var in self.raw_variables
-            }
+        file_dict = {}
+        for var in self.raw_variables:
+            pattern = f"{self.variable_mapping[var]}/{self.variable_mapping[var]}*.nc"
+            file_dict[var] = sorted(self.orig_dir.glob(pattern)) # does not work with **/* with symlinks!
 
         self.file_dict = file_dict
+
+    # def load_file_dict(self):
+    #     file_dict = {}
+    #     for var in self.raw_variables:
+    #         pattern = f"{self.variable_mapping[var]}/{self.variable_mapping[var]}*.nc"
+    #         matches = []
+    #         for d in self.orig_dir:  # orig_dir is now always a list
+    #             matches.extend(d.glob(pattern))
+    #         file_dict[var] = sorted(matches)
+    #     self.file_dict = file_dict
 
  
     def load_raw(self) -> None:
@@ -104,13 +194,13 @@ class Experiment:
         """
         print('Loading raw data...')
 
-        # self.raw_data = {var: xr.open_mfdataset(self.file_dict[var], combine='by_coords', use_cftime=True, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
+        # self.raw_data = {var: xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
         #     for var in self.raw_variables
         # }
         self.raw_data = {}
         for var in self.raw_variables:
             print(var)
-            self.raw_data[var] = xr.open_mfdataset(self.file_dict[var], combine='by_coords', use_cftime=True, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
+            self.raw_data[var] = xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
  
     # ------------------------------------------------------------------
     # 2. CDO remapping to a target grid
@@ -118,18 +208,13 @@ class Experiment:
  
     def remap(self, target_ds: xr.Dataset, save_remapped = False) -> None:
         """
-        Interpolate each file in *file_dict* to the grid of *target_grid_file*
-        using CDO Python bindings and write results to ``self.remap_dir``.
+        Interpolates to target_ds (the kernel ds).
  
         Parameters
         ----------
-        file_dict : list of path-like
-            Source files to be remapped.
-        target_grid_file : path-like
-            NetCDF file whose grid defines the target resolution.
-        method : str
-            CDO remapping operator: ``"remapbil"`` (default), ``"remapcon"``,
-            ``"remapnn"``, etc.
+        target_ds
+
+        save_rempped
         """
 
         ### Improve! use smmregrid instead. compatibility with gaussian reduced/curvilinear?
@@ -140,7 +225,7 @@ class Experiment:
             print("Saving remapped to disk")
             for var in remapped:
                 print(var)
-                remapped[var].compute().to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.exp_type}_remapped.nc'))
+                remapped[var].compute().to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
         else:
             self.ds = xr.merge([remapped[var] for var in remapped])
 
@@ -196,13 +281,49 @@ class Experiment:
             Glob pattern to discover files inside ``self.remap_dir``.
         """
 
-        pattern = f"*_{self.exp_type}_remapped.nc"
+        pattern = f"*_{self.name}_remapped.nc"
         files = sorted(self.remap_dir.glob(pattern))
         if len(files) > 0:
-            self.ds = xr.open_mfdataset(files, combine = "by_coords", use_cftime=True, chunks = self.chunks_remap, preprocess = preproc)
+            self.ds = xr.open_mfdataset(files, combine = "by_coords", decode_times=time_coder, chunks = self.chunks_remap, preprocess = preproc)
         else:
             raise ValueError('No remapped dataset found on disk!')
             # Alternatively, can compute them from raw
+
+    def check_remapped(self) -> None:
+        """
+        Check if remapped files are there.
+
+        IMPROVE: check that all variables are there
+        """
+
+        pattern = f"*_{self.name}_remapped.nc"
+        files = sorted(self.remap_dir.glob(pattern))
+        if len(files) > 0:
+            print(f'{self.name} already remapped')
+            return True
+        else:
+            return False
+
+
+    def load_surf_pressure(self, pressure_path, target_ds) -> None:
+        """
+        Loads surface pressure to compute atmospheric layers.
+        Interpolates to kernel grid
+        """
+        if pressure_path:  # If pressure data is specified, load it
+            print("Loading surface pressure data...")
+            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
+            if not ps_files:
+                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
+            
+            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords', decode_times=time_coder)
+        
+        psclim = surf_pressure.groupby('time.month').mean(dim='time')
+        psye = psclim['ps'].mean('month')
+        
+        psye_rg = regrid(psye, target_ds).compute()
+
+        self.surf_pressure = psye_rg
  
     
     def check_albedo(self) -> None:
@@ -273,14 +394,14 @@ class Experiment:
             self.ds_clim = self.ds_clim.compute()
 
 
-    def compute_runmean(self, window_years = 21, compute = True):
+    def compute_runmean(self, window_years = 21, time_range = None, compute = True):
         """
         Computes running mean of dataset.
         """
-        self.ds_run = compute_running_mean(self.ds, window_years=window_years)
+        self.ds_clim = compute_running_mean(self.ds, window_years=window_years, time_range = time_range)
 
         if compute:
-            self.ds_run = self.ds_run.compute()
+            self.ds_clim = self.ds_clim.compute()
 
 
     def compute_anom_clim(self, control):
@@ -299,17 +420,15 @@ class Experiment:
             self.ds_anom = self.ds - expand_clim(control.ds_clim, self.ds)
 
 
-
     def compute_anom_aligned(self, control):
         """
-        Removes climatology from a control run, aligning the time axis.
+        Removes climatology from a control run, aligning the time axis (experiment and climatology need to have the same length!).
         """
 
-        check_time_axis(self.ds, control.ds_run)
-        clim_aligned = control.ds_run.drop("time")
+        check_time_axis(self.ds, control.ds_clim)
+        clim_aligned = control.ds_clim.drop("time")
         clim_aligned["time"] = self.ds["time"]
         self.ds_anom = self.ds - clim_aligned
-
         
     
     def check_lazy_loading(self):
@@ -318,13 +437,15 @@ class Experiment:
  
     def __repr__(self) -> str:
         return (
-            f"ClimateDataset(\n"
-            f"  exp_type      = {self.exp_type!r}\n"
+            f"Experiment(\n"
+            f"  name      = {self.name!r}\n"
             f"  variables (raw) = {self.raw_variables}\n"
             f"  variables = {self.variables}\n"
             f"  remap_dir  = {self.remap_dir}\n"
             f"  raw_data = {len(self.raw_data)} DataArray(s)\n"
             f"  ds    = {list(self.ds.data_vars)}\n"
+            f"  ds_anom    = {list(self.ds_anom.data_vars)}\n"
+            f"  ds_clim    = {list(self.ds_clim.data_vars)}\n"
             f")"
         )
 
@@ -355,12 +476,14 @@ def compute_climatology(ds, time_range = None):
     return ds_clim
 
 
-def compute_running_mean(ds, window_years = 21):
+def compute_running_mean(ds, window_years = 21, time_range = None):
     """
     Computes running mean of dataset.
     """
+    if time_range is not None:
+        ds_clim = ds.sel(time=slice(time_range['start'], time_range['end']))
 
-    ds_clim = ctl.running_mean(ds, window_years*12)
+    ds_clim = ctl.running_mean(ds_clim, window_years*12)
 
     return ds_clim
 
@@ -402,7 +525,7 @@ def mytestfunction():
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str, cart_out: str):
+def load_spectral_kernel(cart_k: str):
     """
     Loads and preprocesses spectral kernels for further analysis.
 
@@ -418,9 +541,6 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
         Base path containing spectral kernel subdirectories:
         - clear_sky_fluxes/
         - all_sky_fluxes/
-
-    cart_out : str
-        Output directory for pickled kernel objects.
 
     version : str, optional
         Kernel version string (default: "v3").
@@ -496,13 +616,11 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
 
     for (tip, vname), da in allkers.items():
         ds_out[f"{tip}_{vname}"] = da
-    pickle.dump(allkers, open(os.path.join(cart_out, "allkers_SPECTRAL.p"), "wb"))
-    pickle.dump(vlevs, open(os.path.join(cart_out, "vlevs_SPECTRAL.p"), "wb"))
     
-    return allkers
+    return allkers, None # no dp
 
 
-def load_kernel_ERA5(cart_k, cart_out, finam):
+def load_kernel_ERA5(cart_k, finam):
     """
     Loads and preprocesses ERA5 kernels for further analysis.
 
@@ -567,10 +685,11 @@ def load_kernel_ERA5(cart_k, cart_out, finam):
     
     vlevs = xr.load_dataset( cart_k+'dp_era5.nc')
     vlevs=vlevs.rename({'level': 'plev', 'latitude': 'lat', 'longitude': 'lon'})
-    pickle.dump(vlevs, open(cart_out + 'vlevs_ERA5.p', 'wb'))
-    return allkers
 
-def load_kernel_HUANG(cart_k, cart_out, finam):
+    return allkers, vlevs.dp
+
+
+def load_kernel_HUANG(cart_k, finam):
     """
     Loads and processes climate kernel datasets (from HUANG 2017), and saves specific datasets to pickle files.
 
@@ -617,79 +736,13 @@ def load_kernel_HUANG(cart_k, cart_out, finam):
 
     vlevs = xr.load_dataset( cart_k + 'dp.nc')  
     vlevs=vlevs.rename({'player': 'plev'})
-    pickle.dump(vlevs, open(cart_out + 'vlevs_HUANG.p', 'wb'))
-
-    return allkers
-
-def load_kernel_wrapper(ker, config_file: str):
-    """
-    Loads and processes climate kernel datasets, and saves specific datasets to pickle files.
-
-    Parameters:
-    -----------
-
-    ker (str): 
-        The name of the kernel to load (e.g., 'ERA5' or 'HUANG').
-
-    cart_k : str
-        Path template to the kernel dataset files. 
-        Placeholders should be formatted as `{}` to allow string formatting.
-        
-    cart_out : str
-        Path template to save the outputs. 
     
-    Returns:
-    --------
-    allkers : dict
-        A dictionary containing the preprocessed kernels. The dictionary keys are tuples of the form `(tip, variable)`, where:
-        - `tip`: Atmospheric condition ('clr' for clear-sky, 'cld' for all-sky).
-        - `variable`: Name of the variable (`'t'` for temperature, `'ts'` for surface temperature, `'wv_lw'`, `'wv_sw'`, `'alb'`).
+    return allkers, vlevs.dp
 
-    Saved Files:
-    ------------
-    - **`vlevs_ker.p`**: Pickle file containing the pressure levels (`player`).
-    - **`cose_ker.p`**: Pickle file containing the pressure levels scaled to hPa.
-    - **`allkers_ker.p`**: Pickle file containing all preprocessed kernels.
 
+def load_kernel(ker, cart_k, finam=None):
     """
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-
-    if ker == 'ERA5':
-        cart_k  = config['kernels']['era5']['path_input']
-        cart_out = config['kernels']['era5']['path_output']
-        finam     = config['kernels']['era5']['filename_template']
-        allkers = load_kernel(ker, cart_k, cart_out, finam)
-
-    elif ker == 'HUANG':
-        cart_k  = config['kernels']['huang']['path_input']
-        cart_out = config['kernels']['huang']['path_output']
-        finam   = config['kernels']['huang']['filename_template']
-        allkers = load_kernel(ker, cart_k, cart_out, finam)
-
-    elif ker == 'SPECTRAL':
-        cart_k  = config['kernels']['spect']['path_input']
-        cart_out = config['kernels']['spect']['path_output']
-        # NO finam
-        allkers = load_kernel(ker, cart_k, cart_out)
-
-    else:
-        raise ValueError(f"Unknown kernel type: {ker}")
-
-    return allkers
-
-def load_kernel(ker, cart_k, cart_out, finam=None):
-    """
-    Selects and loads radiative kernels from different sources.
-
-    This function acts as a unified interface for loading and preprocessing
-    radiative kernels from multiple datasets: ERA5, HUANG, and SPECTRAL.
-    It dispatches the loading task to the corresponding specialized routine
-    based on the selected kernel type, and returns the processed kernel
-    dictionary.
+    Selects and loads radiative kernels from different sources: ERA5, HUANG, and SPECTRAL.
 
     Parameters:
     -----------
@@ -705,10 +758,6 @@ def load_kernel(ker, cart_k, cart_out, finam=None):
         Path to the directory containing the kernel NetCDF files for the
         selected dataset.
 
-    cart_out : str
-        Path to the directory where preprocessed kernels, metadata,
-        and auxiliary files will be saved by the underlying loader.
-
     finam : str
         Filename pattern used to locate the kernel files. It must include
         a formatting placeholder (e.g., `'ERA5_kernel_{}_TOA.nc'`,
@@ -718,54 +767,178 @@ def load_kernel(ker, cart_k, cart_out, finam=None):
     Returns:
     --------
     allkers : dict
-        A dictionary containing the preprocessed kernels produced by the
-        selected loader. The structure of the dictionary depends on the
-        kernel dataset:
-        - ERA5     → keys of the form `(tip, variable)`
-        - HUANG    → structure defined in `load_kernel_HUANG`
-        - SPECTRAL → keys of the form `(tip, variable)` with spectral
-                      frequency selection applied
+        A dictionary containing the kernels. Keys are: `(tip, variable)`.
+        
+    ### IMPROVE: return a dataset instead of a dict
 
-    Notes:
-    ------
-    - This function does not perform preprocessing directly; all variable
-      renaming, frequency selection, and file saving are handled inside
-      the specific loader.
-    - If an unsupported kernel name is provided, the function will fail
-      silently unless additional validation is added.
+    dp : xr.DataArray
+        The width of the atmospheric layers in units of 100 hPa.
     """
     if ker == 'ERA5':
-        return load_kernel_ERA5(cart_k, cart_out, finam)
+        return load_kernel_ERA5(cart_k, finam)
 
     elif ker == 'HUANG':
-        return load_kernel_HUANG(cart_k, cart_out, finam)
+        return load_kernel_HUANG(cart_k, finam)
 
     elif ker == 'SPECTRAL':
-        return load_spectral_kernel(cart_k, cart_out)
-
+        return load_spectral_kernel(cart_k)
     else:
         raise ValueError(f"Unsupported kernel type: {ker}")
 
 #################################################################################################
 
+def load_config(config_file, variable_mapping_file = None):
+    """
+    Loads the configuration from config_file, returns a dict. Creates output directory.
+    """
+    
+    with open(config_file, 'r') as file:
+        config = yaml.safe_load(file)
 
-def pipeline():
+    reference_dataset = config['file_paths']['reference_dataset']
+    # if not isinstance(reference_dataset, list):
+    #     reference_dataset = [reference_dataset]
+    # config['file_paths']['reference_dataset'] = [Path(p) for p in reference_dataset]
+
+    experiment_dataset = config['file_paths']['experiment_dataset']
+    # if not isinstance(experiment_dataset, list):
+    #     experiment_dataset = [experiment_dataset]
+    # config['file_paths']['experiment_dataset'] = [Path(p) for p in experiment_dataset]
+
+    exp_name = config['exp_name']
+    # if not isinstance(exp_name, list):
+    #     exp_name = [exp_name]
+    # config['exp_name'] = exp_name
+    
+    cart_out = config['file_paths'].get("output")
+    ## Create dirs
+    cart_out_exp = cart_out + f'/{exp_name}/'
+    os.makedirs(cart_out_exp, exist_ok=True)
+    config['cart_out_exp'] = cart_out_exp
+    
+    method = config.get("anomaly_method")
+    if method is None:
+        method = "climatology"
+        print("The config file does not specify 'anomaly_method' (e.g., 'climatology', 'running_mean'), assuming 'climatology'.")
+    
+    config["anomaly_method"] = method
+
+    #### qui mkdir e cart_out differenziate
+    use_atm_mask=config.get("use_atm_mask", True)
+    save_pattern = config.get("save_pattern", False)
+    
+    config['use_atm_mask'] = bool(use_atm_mask)
+    config['save_pattern'] = bool(save_pattern)
+    config['num_year_regr'] = config.get("num_year_regr", 10)
+
+    # Read time ranges from config
+    time_range_clim = config.get("time_range_clim", {})
+    time_range_exp = config.get("time_range_exp", {})
+    # Validate and clean time ranges
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
+    
+    print(f"Time range for climatology: {time_range_clim if time_range_clim else "all"}")
+    print(f"Time range for experiment: {time_range_exp if time_range_exp else "all"}")
+    config['time_range_exp'] = time_range_exp
+    config['time_range_clim'] = time_range_clim
+
+    # Surface pressure management
+    config['pressure_path'] = config['file_paths'].get('pressure_data', None)
+
+    # Load variable mapping for non-CMOR names
+    if variable_mapping_file is not None:
+        variable_map = load_variable_mapping(variable_mapping_file, config['exp_name'])['rename_map']
+        config['variable_mapping'] = variable_map
+    else:
+        config['variable_mapping'] = None
+
+    return config
+
+
+
+def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None):
+    """
+    All the preprocessing needed before calling the feedback calculations:
+        - Reads experiment, control and kernels;
+        - Remaps to kernel resolution;
+        - Computes climatology;
+        - Computes anomalies;
+        - Computes width of atm layers for kernel;
+    """
+    
     # load config
+    config = load_config(config_file, variable_mapping_file = variable_mapping_file)
 
+    # load kernel
+    kernel = Kernel(ker, config = config)
+    k = kernel.kernel[('clr', 't')]
+
+    if kernel.use_log_wv:
+        variables = STD_VARS_LOGQ
+    else:
+        variables = STD_VARS
+    
     # load picontrol (+ remap)
+    print('\n -------> Loading control')
+    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = variables, variable_mapping = config['variable_mapping'])
 
-    # compute climatology
+    if control.check_remapped():
+        control.load_remapped()
+    else:
+        print(f"Remapped data not found in: {control.remap_dir}, computing from raw..")
+        control.load_raw()
+        control.remap(target_ds = k, save_remapped = True)
+    
+    control.check_vars()
+    control.vertical_interp(k)
 
     # load 4x (+ remap)
+    print('\n -------> Loading experiment')
+    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = variables, variable_mapping = config['variable_mapping'])
+    if experiment.check_remapped():
+        experiment.load_remapped()
+    else:
+        print(f"Remapped data not found in: {experiment.remap_dir}, computing from raw..")
+        experiment.load_raw()
+        experiment.remap(target_ds = k, save_remapped = True)
 
-    # compute anomalies
+    experiment.check_vars()
+    experiment.vertical_interp(k)
+
+    # compute climatology and anomaly
+    method = config['anomaly_method']
+    print(f"\n -------> Computing {method} and anomalies")
+    
+    if method == 'climatology':
+        control.compute_clim(time_range = config['time_range_clim'], compute = True)
+        experiment.compute_anom_clim(control)
+    elif method == 'running_mean':
+        control.compute_runmean(window_years = config['num_running_years_trend'], time_range=config['time_range'], compute = True)
+        experiment.compute_anom_aligned(control)
+    else:
+        raise ValueError(f"Unknown anomaly method {method}")
+
+    if ker == 'HUANG':
+        print(f"\n -------> Recomputing atm dp with surface pressure\n")
+        experiment.load_surf_pressure(config['pressure_path'], k)
+        kernel.recompute_dp(experiment)
+
+    print(f"\n ----------> Preprocessing complete for {config['exp_name']} <------------\n")
 
     ### up to this point: everything still lazy!
+    return control, experiment, kernel
 
-    # calc feedbacks (all or only some)
+
+def main_loop(config_file, ker = 'HUANG'):
+    control, experiment, kernel = preprocess_data(config_file, ker)
+
+    ### Calc feedbacks
 
     return
 
+
+###############################################################################################
 
 
 ###### LOAD AND CHECK DATA
@@ -805,13 +978,13 @@ def pipeline():
 #         raise ValueError("Error: The 'experiment_dataset' path is not specified in the configuration file")
 
     
-#     ds_list = [xr.open_mfdataset(file_path1, combine='by_coords', use_cftime=True, chunks={'time': time_chunk})]
+#     ds_list = [xr.open_mfdataset(file_path1, combine='by_coords', decode_times=time_coder, chunks={'time': time_chunk})]
  
 #     if file_path2 and file_path2.strip():
-#         ds_list.append(xr.open_mfdataset(file_path2, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
+#         ds_list.append(xr.open_mfdataset(file_path2, combine='by_coords', decode_times=time_coder, chunks={'time': time_chunk}))
 
 #     if file_pathpl and file_pathpl.strip():
-#         ds_list.append(xr.open_mfdataset(file_pathpl, combine='by_coords', use_cftime=True,  chunks={'time': time_chunk}))
+#         ds_list.append(xr.open_mfdataset(file_pathpl, combine='by_coords', decode_times=time_coder,  chunks={'time': time_chunk}))
 
 #     # Merge dataset
 #     print('Now merging')
@@ -975,10 +1148,10 @@ def preproc(ds):
 #     if not filin_pi:
 #         raise ValueError("Error: the 'reference_dataset' path is not specified in the configuration file.")
 
-#     ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', compat='no_conflicts', use_cftime=True, preprocess = preproc, chunks={'time': time_chunk})]
+#     ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', compat='no_conflicts', decode_times=time_coder, preprocess = preproc, chunks={'time': time_chunk})]
     
 #     if filin_pi_pl and filin_pi_pl.strip():
-#         ds_list.append(xr.open_mfdataset(filin_pi_pl, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
+#         ds_list.append(xr.open_mfdataset(filin_pi_pl, combine='by_coords', decode_times=time_coder, chunks={'time': time_chunk}))
 
 #     ds_ref = xr.merge(ds_list, compat="override")
 
@@ -2017,7 +2190,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
-            feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ ".nc",  use_cftime=True)
+            feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ ".nc",  decode_times=time_coder)
             start_year = int(feedbacks.year.min())
             feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
 
@@ -2027,7 +2200,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
-                feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip +".nc", use_cftime=True) 
+                feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip +".nc", decode_times=time_coder) 
                 start_year = int(feedbacks_pattern.year.min())
                 feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num * num).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
@@ -2182,7 +2355,7 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
-            feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ ".nc",  use_cftime=True)
+            feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ ".nc",  decode_times=time_coder)
             inter=calc_inter(feedbacks, running_years)
 
             res = stats.linregress(temp,inter)
@@ -2190,7 +2363,7 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
-                feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+ ".nc", use_cftime=True)
+                feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+ ".nc", decode_times=time_coder)
                 feedbacks_pattern_dec=calc_inter(feedbacks_pattern, running_years)              
 
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
@@ -2480,7 +2653,7 @@ def single_feedback(name, config_file, ker, variable_mapping_file, cart_out, all
     
     fb=dict()
     for tip in ['clr', 'cld']:
-        feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+ suffix +"-"+ker+"kernels.nc",  use_cftime=True)
+        feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+ suffix +"-"+ker+"kernels.nc",  decode_times=time_coder)
         start_year = int(feedbacks.year.min())
         feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
 
