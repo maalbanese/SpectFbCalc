@@ -225,9 +225,9 @@ class Experiment:
             print("Saving remapped to disk")
             for var in remapped:
                 print(var)
-                remapped[var].compute().to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
-        else:
-            self.ds = xr.merge([remapped[var] for var in remapped])
+                remapped[var] = remapped[var].compute().to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
+            
+        self.ds = xr.merge([remapped[var] for var in remapped])
 
 
 
@@ -470,6 +470,8 @@ def compute_climatology(ds, time_range = None):
     """
     if time_range is not None:
         ds_clim = ds.sel(time=slice(time_range['start'], time_range['end']))
+    else:
+        ds_clim = ds
 
     ds_clim = ds_clim.groupby('time.month').mean()
 
@@ -1286,6 +1288,14 @@ def mask_strato(ta):
 
     mask = cond.astype(int).cumprod("plev")
     mask = mask.where(mask == 1)
+
+    # re-adding the last level with all zeros
+    zero_slice = xr.zeros_like(ta.isel(plev=0)).assign_coords(plev=ta.plev[-1]).expand_dims('plev')
+    mask = xr.concat([mask, zero_slice], dim='plev').transpose(*ta.dims)
+    
+    if ta.chunks:
+        chunk_dic = {dim: chu for dim, chu in zip(ta.dims, ta.chunks)}
+        mask = mask.chunk(chunk_dic)
 
     return mask
 
