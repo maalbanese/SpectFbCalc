@@ -1296,7 +1296,7 @@ def mask_strato(ta):
     if ta.chunks:
         chunk_dic = {dim: chu for dim, chu in zip(ta.dims, ta.chunks)}
         mask = mask.chunk(chunk_dic)
-
+        
     return mask
 
 ### Mask for surf pressure
@@ -1734,11 +1734,11 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
             continue  
 
         if kernel.name=='SPECTRAL':
-            dRt_unif = (anoms_unif.groupby('time.month')*k).sum(dim="plev")
-            dRt_lr = (anoms_lr.groupby('time.month')*k).sum(dim="plev")
+            dRt_unif = (anoms_unif.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
+            dRt_lr = (anoms_lr.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
         else:
-            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev")
-            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev") 
+            dRt_unif = (anoms_unif.groupby('time.month') * k * kernel.dp).sum("plev").groupby("time.year").mean("time")
+            dRt_lr = (anoms_lr.groupby('time.month') * k * kernel.dp).sum("plev").groupby("time.year").mean("time")
 
 
         #Save full dRt pattern before global averaging
@@ -1907,7 +1907,7 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
         anoms_hus=experiment.ds_anom[wv_name]
             
     if kernel.name=='HUANG':
-        coso = anoms_hus* dlnws(control.ds_clim['ta'])
+        coso = anoms_hus.groupby('time.month') * dlnws(control.ds_clim['ta'])
     elif kernel.name=='ERA5':
         coso = (anoms_hus.groupby('time.month') / control.ds_clim['hus']).groupby('time.month') * (control.ds_clim['ta']**2) * Rv / Lv    
     elif kernel.name == "SPECTRAL":
