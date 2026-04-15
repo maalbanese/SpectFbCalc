@@ -923,7 +923,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
         control.compute_clim(time_range = config['time_range_clim'], compute = True)
         experiment.compute_anom_clim(control)
     elif method == 'running_mean':
-        control.compute_runmean(window_years = config['num_running_years_trend'], time_range=config['time_range'], compute = True)
+        control.compute_runmean(window_years = config['num_running_years_trend'], time_range=config['time_range_clim'], compute = True)
         experiment.compute_anom_aligned(control)
     else:
         raise ValueError(f"Unknown anomaly method {method}")
@@ -1744,8 +1744,8 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
             dRt_unif = (anoms_unif.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
             dRt_lr = (anoms_lr.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
         else:
-            dRt_unif = (anoms_unif.groupby('time.month') * k * kernel.dp).sum("plev").groupby("time.year").mean("time")
-            dRt_lr = (anoms_lr.groupby('time.month') * k * kernel.dp).sum("plev").groupby("time.year").mean("time")
+            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
+            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
 
 
         #Save full dRt pattern before global averaging
@@ -1901,7 +1901,7 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
     
     Rv = 461.5 # gas constant of water vapor
     Lv = 2.25e+06 # latent heat of water vapor
-
+    
     if kernel.use_log_wv:
         wv_name='hus_log'
     else:
@@ -1914,7 +1914,11 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
         anoms_hus=experiment.ds_anom[wv_name]
             
     if kernel.name=='HUANG':
-        coso = anoms_hus.groupby('time.month') * dlnws(control.ds_clim['ta'])
+        dln = dlnws(control.ds_clim['ta'])
+        if 'time' in dln.dims:
+            coso = anoms_hus * dln.values
+        elif 'month' in dln.dims:
+            coso = anoms_hus.groupby('time.month') * dln
     elif kernel.name=='ERA5':
         coso = (anoms_hus.groupby('time.month') / control.ds_clim['hus']).groupby('time.month') * (control.ds_clim['ta']**2) * Rv / Lv    
     elif kernel.name == "SPECTRAL":
@@ -1929,8 +1933,8 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
         if kernel.name=='SPECTRAL':
             dRt_lw = (coso.groupby('time.month')* kernel_lw).sum('plev').groupby('time.year').mean('time')
         else:
-            dRt_lw = (coso.groupby('time.month')* kernel_lw*kernel.dp).sum('plev').groupby('time.year').mean('time')
-            dRt_sw = (coso.groupby('time.month')* kernel_sw*kernel.dp).sum('plev').groupby('time.year').mean('time')
+            dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
+            dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
             dRt = dRt_lw + dRt_sw
                 
                 
