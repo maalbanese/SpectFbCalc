@@ -35,9 +35,9 @@ from cdo import Cdo
 ### Functions 
 time_coder = xr.coders.CFDatetimeCoder(use_cftime = True)
 
-STD_VARS = {"hus", "rlut", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
-STD_VARS_LOGQ = {"hus_log", "rlut", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
-STD_VARS_NOALB = {"hus", "rlut", "rlutcs", "rsut", "rsutcs", "ta", "tas", "ts", "rsds", "rsus"}
+STD_VARS = {"hus", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
+STD_VARS_LOGQ = {"hus_log", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
+STD_VARS_NOALB = {"hus", "rlut", "rsdt", "rlutcs", "rsut", "rsutcs", "ta", "tas", "ts", "rsds", "rsus"}
 
 
 def regrid(ds, target_ds):
@@ -47,6 +47,7 @@ def regrid(ds, target_ds):
     coso = ctl.regrid_dataset(ds, target_ds.lat, target_ds.lon)
     coso.name = ds.name
     return coso
+
 
 
 class Kernel:
@@ -324,6 +325,11 @@ class Experiment:
         psye_rg = regrid(psye, target_ds).compute()
 
         self.surf_pressure = psye_rg
+    
+    def Net_TOA(self):
+        print('Creating Net TOA variables')
+        self.ds['Net'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut']
+        self.ds['Net0'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs']
  
     
     def check_albedo(self) -> None:
@@ -374,6 +380,7 @@ class Experiment:
         
         if 'alb' in variables: self.check_albedo()
         if 'hus_log' in variables: self.check_hus_log()
+        self.Net_TOA()
 
         for var in variables:
             if var in self.ds:
@@ -1660,6 +1667,7 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
         #Then compute and save global mean
         dRt_glob = ctl.global_mean(dRt)
         planck = dRt_glob.compute()
+        planck.name='planck-surf'
         radiation[(tip, 'planck-surf')] = planck
         planck.to_netcdf(cart_out + "dRt_planck-surf_global_" + tip + ".nc", format="NETCDF4")
         planck.close()
@@ -1763,6 +1771,8 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
         dRt_lr_glob = ctl.global_mean(dRt_lr)
         feedbacks_atmo = dRt_unif_glob.compute()
         feedbacks_lr = dRt_lr_glob.compute()
+        feedbacks_atmo.name='planck-atmo'
+        feedbacks_lr.name='lapse-rate'
         radiation[(tip,'planck-atmo')]=feedbacks_atmo
         radiation[(tip,'lapse-rate')]=feedbacks_lr 
         feedbacks_atmo.to_netcdf(cart_out+ "dRt_planck-atmo_global_" +tip + ".nc", format="NETCDF4")
@@ -1838,6 +1848,7 @@ def Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern=False):
         #Then compute and save global mean
         dRt_glob = ctl.global_mean(dRt).compute()
         alb = 100*dRt_glob
+        alb.name='albedo'
         radiation[(tip, 'albedo')]= alb
         alb.to_netcdf(cart_out+ "dRt_albedo_global_" +tip + ".nc", format="NETCDF4")
         alb.close()
@@ -1955,107 +1966,49 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
         
         dRt_glob_lw = ctl.global_mean(dRt_lw)
         wv_lw= dRt_glob_lw.compute()
+        wv_lw.name='water-vapor_lw'
         wv_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
         radiation[(tip, 'water-vapor_lw')] = wv_lw
         if kernel.name != 'SPECTRAL':
             dRt_glob_sw = ctl.global_mean(dRt_sw)
             wv_sw= dRt_glob_sw.compute()
+            wv_sw.name='water-vapor_sw'
             radiation[(tip, 'water-vapor_sw')] = wv_sw
             wv_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
   
             dRt_glob = ctl.global_mean(dRt)
             wv= dRt_glob.compute()
+            wv.name='water-vapor'
             radiation[(tip, 'water-vapor')] = wv
             wv.to_netcdf(cart_out+ "dRt_water-vapor_global_" + tip + ".nc", format="NETCDF4")
             wv.close()
         
     return radiation
+#CLOUD ANOMALY
+def Rad_anomaly_cloud(experiment, control, cart_out):
+    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+    dRt={}
+    
+    crf = experiment.ds_anom['Net0'] - experiment.ds_anom['Net']
+
+    lat_target = np.linspace(-90, 90, 73)
+    lon_target = np.linspace(0, 357.5, 144)
+    crf = ctl.regrid_dataset(crf, lat_target, lon_target)
+    crf_glob= ctl.global_mean(crf).groupby('time.year').mean('time')
+
+    dRt = open_dRt(cart_out, names=dRt_nocloud)
+
+    dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud])#Finisci di scrivere
+    cloud = dRt_cloud.compute()
+    cloud.name='cloud'
+    cloud.to_netcdf(cart_out + "dRt_cloud_global.nc", format="NETCDF4")
+    return cloud
+
 
 #ALL RAD_ANOM COMPUTATION
 
 def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, force_recompute=True):
-    """
-    Computes radiative anomalies for multiple feedback components using
-    precomputed kernels.
 
-    This function evaluates the radiative anomaly associated with several
-    radiative feedback components—surface Planck response, atmospheric
-    Planck response, albedo, and water vapor—by applying the selected
-    kernels to the input dataset. Each component is computed only if a
-    preprocessed NetCDF file is not already present; otherwise the function
-    loads the saved results to avoid redundant computation.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Input dataset containing the model or observational fields needed
-        to compute anomalies.
-
-    piok_rad : xr.Dataset
-        Reference climatology against which anomalies are computed.
-
-    ker : str
-        Identifier of the kernel type being used 
-        (e.g., `'ERA5'`, `'HUANG'`, `'SPECTRAL'`).
-
-    allkers : dict
-        Dictionary containing the kernels previously processed by a
-        kernel-loading function (e.g., `load_kernel_ERA5`).
-
-    cart_out : str
-        Output directory where anomaly components will be saved as
-        NetCDF files when first computed.
-
-    surf_pressure : xr.Dataset or None
-        Surface pressure dataset, required for certain kernel types (e.g. HUANG).
-        If not needed for the kernel type, can be left as `None`.
-
-    time_range : dict or None, optional
-        Time range to apply when computing anomalies (e.g. 
-        `{'start': '2000', 'end': '2010'}`).  
-        If `None`, the full dataset time range is used.
-
-    method : str, optional
-        Method used to compute anomalies (e.g., `'climatology'`, `'running_m'`,
-        `'climatology_mean'`, etc.).  
-        This determines the output filename suffix.
-
-    config_file : str or dict, optional
-        Path to a configuration YAML file or the already-loaded config dict.
-        Passed to subfunctions when additional settings are required.
-
-    use_atm_mask : bool, optional
-        If `True`, masks regions not used for atmospheric anomaly computation.
-
-    save_pattern : bool, optional
-        If `True`, also saves spatial anomaly patterns (not just global means).
-
-    Returns
-    -------
-    anom_ps : xr.Dataset
-        Radiative anomaly from the surface Planck response.
-
-    anom_pal : xr.Dataset
-        Radiative anomaly from the atmospheric Planck response.
-
-    anom_a : xr.Dataset
-        Radiative anomaly from surface albedo changes.
-
-    anom_wv : xr.Dataset
-        Radiative anomaly from water vapor changes.
-
-    Notes
-    -----
-    - The function avoids recomputation by checking whether output files
-      already exist in `cart_out`.
-    - The actual computation is delegated to the respective functions:
-        - `Rad_anomaly_planck_surf`
-      	- `Rad_anomaly_planck_atm_lr`
-      	- `Rad_anomaly_albedo`
-      	- `Rad_anomaly_wv`
-    - Output files follow the naming pattern:
-          dRt_<component>_global_clr_<method>-<ker>kernels.nc
-    """
 
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
@@ -2087,90 +2040,37 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
         anom_wv = Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)
     else:
         print(f'Reading already computed anomaly from {path}')
-        anom_wv = xr.open_dataset(path)  
+        anom_wv = xr.open_dataset(path) 
 
-    return anom_ps, anom_pal, anom_a, anom_wv 
+    print('cloud')
+    path = os.path.join(cart_out, "dRt_cloud_global.nc")
+    if not os.path.exists(path) or force_recompute:
+        anom_cloud = Rad_anomaly_cloud(experiment, control, cart_out)
+    else:
+        print(f'Reading already computed anomaly from {path}')
+        anom_cloud = xr.open_dataset(path) 
+
+    return anom_ps, anom_pal, anom_a, anom_wv, anom_cloud 
 
 ##FEEDBACK COMPUTATION
         
-    
+dRt_all=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo', 'cloud']
+dRt_nocloud=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+
+def open_dRt(cart_out, names=dRt_all):
+    dRt= {}
+    for tip in ['clr', 'cld']:
+        for i in names:
+            if i != 'cloud':
+                dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_global_"+tip+ ".nc",  decode_times=time_coder)
+    if 'cloud' in names:
+        dRt[('cld', 'cloud')] = xr.open_dataarray(cart_out+"dRt_cloud_global.nc",  decode_times=time_coder)
+    return dRt
+
+
+
 def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num=10):
-    """
-    Compute radiative and cloud feedbacks using preprocessed kernels.
-
-    This function calculates feedbacks from multiple radiative components:
-    - Planck surface
-    - Planck atmospheric
-    - Albedo
-    - Water vapor
-
-    It also computes cloud feedbacks by performing linear regression between
-    global mean temperature anomalies and radiative anomalies. Optionally,
-    spatial feedback patterns can be computed and saved.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing climate model output variables.
-
-    piok : xarray.Dataset
-        Reference climatology dataset used for computing radiative anomalies.
-
-    ker : str
-        Kernel type (e.g., `'HUANG'`) that determines specific calculations.
-
-    allkers : dict
-        Dictionary of kernels for the different radiative feedback components.
-
-    cart_out : str
-        Output directory where computed feedbacks and patterns are saved.
-
-    surf_pressure : xarray.Dataset or None
-        Surface pressure dataset, required for certain kernel types.
-
-    time_range : dict or None, optional
-        Time range used for computing anomalies, e.g.,
-        `{'start': '2000', 'end': '2010'}`. If `None`, full dataset range
-        is used.
-
-    method : str, optional
-        Method used for anomaly computation. Options include:
-        - `"climatology"`: monthly averaged climatology
-        - `"running_m"`: 21-year running mean
-        - `"climatology_mean"`: time-averaged anomaly
-        - `"running_m_mean"`: running mean anomaly
-
-    config_file : str or dict, optional
-        Configuration settings passed to subfunctions if needed.
-
-    use_atm_mask : bool, optional
-        If `True`, masks regions not used in atmospheric anomaly calculations.
-
-    save_pattern : bool, optional
-        If `True`, computes and saves spatial feedback patterns and
-        standard errors.
-
-    num : int, optional
-        Number of years per regression block when grouping anomalies for
-        decadal averaging (default 10).
-
-    Returns
-    -------
-    fb_coef : dict
-        Radiative feedback coefficients for each component and condition
-        (`'clr'` or `'cld'`).
-
-    fb_cloud : xarray.DataArray
-        Cloud feedback data array derived from global mean regressions.
-
-    fb_cloud_err : xarray.DataArray
-        Error associated with the cloud feedback calculation.
-
-    fb_pattern : dict or None
-        Dictionary of spatial feedback slopes and standard errors for each
-        component and condition. Only returned if `save_pattern=True`.
-    """
-
+   
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
     if not os.path.exists(path):
@@ -2189,10 +2089,18 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
     print('w-v')
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
     if not os.path.exists(path):
-        Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)    
+        Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)   
+
+    print('cloud')
+    path = os.path.join(cart_out, "dRt_cloud_global.nc")
+    if not os.path.exists(path):
+        Rad_anomaly_cloud(experiment, control, cart_out)
+    
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+    dRt={}
     fb_coef = dict()
     fb_pattern = dict()
+    dRt=open_dRt(cart_out)
 
     #compute gtas
 
@@ -2211,9 +2119,8 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
-            feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ ".nc",  decode_times=time_coder)
-            start_year = int(feedbacks.year.min())
-            feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
+            start_year = int(dRt[(tip, fbn)].year.min())
+            feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num * num).mean()
 
             res = stats.linregress(gtas, feedback)
             fb_coef[(tip, fbn)] = res
@@ -2231,23 +2138,15 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
                 slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
     
-    #cloud
-    required_cloud_vars = {"rlut", "rsut", "rlutcs", "rsutcs"}
-    can_compute_cloud = required_cloud_vars.issubset(set(experiment.ds.variables))
-    if can_compute_cloud:
-        print('cloud feedback calculation...')
-        fb_cloud, fb_cloud_err = feedback_cloud(experiment, control, fb_coef, gtas, num)
-    else:
-        print("Cloud variables not found → skipping cloud feedback.")
-        fb_cloud = None
-        fb_cloud_err = None
+    start_year = int(dRt[('cld', 'cloud')].year.min())
+    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num * num).mean()
+    fb_coef[('cld', 'cloud')] = stats.linregress(gtas, feedback)
     
     return {
         "fb_coeffs": fb_coef,
-        "fb_cloud": fb_cloud,
-        "fb_cloud_err": fb_cloud_err,
         "fb_pattern": fb_pattern if save_pattern else None,
     }
+
 
 def calc_inter(ds, running_years):
     med = ctl.running_mean(ds, running_years)
@@ -2256,91 +2155,7 @@ def calc_inter(ds, running_years):
 
 
 def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, running_years=25):   
-    """
-    Compute interannual radiative and cloud feedbacks using a running-mean approach.
-
-    This function calculates feedbacks from multiple radiative components:
-    - Planck surface
-    - Planck atmospheric
-    - Albedo
-    - Water vapor
-
-    Unlike the standard feedback calculation, this function removes long-term
-    trends using a running mean over `running_years` to isolate interannual
-    variability. Cloud feedbacks are computed via linear regression between
-    detrended global mean temperature anomalies and radiative anomalies. Spatial
-    feedback patterns can also be computed and saved if requested.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing climate model output variables.
-
-    piok : xarray.Dataset
-        Reference climatology dataset used for computing radiative anomalies.
-
-    ker : str
-        Kernel type (e.g., `'HUANG'`) that determines specific calculations.
-
-    allkers : dict
-        Dictionary of kernels for the different radiative feedback components.
-
-    cart_out : str
-        Output directory where computed feedbacks and patterns are saved.
-
-    surf_pressure : xarray.Dataset or None
-        Surface pressure dataset, required for certain kernel types.
-
-    time_range : dict or None, optional
-        Time range used for computing anomalies, e.g.,
-        `{'start': '2000', 'end': '2010'}`. If `None`, full dataset range
-        is used.
-
-    method : str, optional
-        Method used for anomaly computation. Options include:
-        - `"climatology"`: monthly averaged climatology
-        - `"running_m"`: 21-year running mean
-        - `"climatology_mean"`: time-averaged anomaly
-        - `"running_m_mean"`: running mean anomaly
-
-    config_file : str or dict, optional
-        Configuration settings passed to subfunctions if needed.
-
-    use_atm_mask : bool, optional
-        If `True`, masks regions not used in atmospheric anomaly calculations.
-
-    save_pattern : bool, optional
-        If `True`, computes and saves spatial feedback patterns and
-        standard errors.
-
-    running_years : int, optional
-        Number of years for the running mean used to remove trends
-        (default is 25).
-
-    Returns
-    -------
-    fb_coef : dict
-        Interannual radiative feedback coefficients for each component and
-        condition (`'clr'` or `'cld'`).
-
-    fb_cloud : xarray.DataArray
-        Cloud feedback data array derived from interannual regressions.
-
-    fb_cloud_err : xarray.DataArray
-        Error associated with the interannual cloud feedback calculation.
-
-    fb_pattern : dict or None
-        Dictionary of spatial feedback slopes and standard errors for each
-        component and condition. Only returned if `save_pattern=True`.
-    Notes
-    -----
-    - Removes long-term trends via a running mean before computing feedbacks.
-    - Performs linear regression between detrended global mean temperature
-      anomalies and radiative anomalies for each component.
-    - Handles optional spatial feedback calculation.
-    - Useful for analyzing interannual variability in climate feedbacks.
-    """
-
+   
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
     if not os.path.exists(path):
@@ -2360,9 +2175,17 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
     if not os.path.exists(path):
         Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern) 
+
+    print('cloud')
+    path = os.path.join(cart_out, "dRt_cloud_global.nc")
+    if not os.path.exists(path):
+        Rad_anomaly_cloud(experiment, control, cart_out)
+    
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+    dRt={}
     fb_coef = dict()
     fb_pattern = dict()
+    dRt=open_dRt(cart_out)
 
     #compute gtas
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
@@ -2376,8 +2199,7 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
-            feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ ".nc",  decode_times=time_coder)
-            inter=calc_inter(feedbacks, running_years)
+            inter=calc_inter(dRt[(tip, fbn)], running_years)
 
             res = stats.linregress(temp,inter)
             fb_coef[(tip, fbn)] = res
@@ -2396,207 +2218,14 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip +  ".nc", format="NETCDF4")
 
     #cloud
-    required_cloud_vars = {"rlut", "rsut", "rlutcs", "rsutcs"}
-    can_compute_cloud = required_cloud_vars.issubset(set(experiment.ds.variables))
-    if can_compute_cloud:
-        print('cloud interannual feedback calculation...')
-        fb_cloud, fb_cloud_err = feedback_cloud_interannual(experiment, control, fb_coef, temp, running_years)
-    else:
-        print("Cloud variables not found → skipping cloud feedback.")
-        fb_cloud = None
-        fb_cloud_err = None
+    inter=calc_inter(dRt[('cld', 'cloud')], running_years)
+    res = stats.linregress(temp,inter)
+    fb_coef['cld', 'cloud'] = res
     
     return {
         "fb_coeffs": fb_coef,
-        "fb_cloud": fb_cloud,
-        "fb_cloud_err": fb_cloud_err,
         "fb_pattern": fb_pattern if save_pattern else None,
-    }
-    
-
-#CLOUD FEEDBACK shell 2008
-def feedback_cloud(experiment, control, fb_coef, surf_anomaly, num=10):
-    """
-    Compute cloud radiative feedback strength and associated error.
-
-    This function calculates cloud feedback as the difference between net
-    radiative flux anomalies under all-sky and clear-sky conditions. It
-    performs linear regression between global mean surface temperature anomalies
-    and radiative fluxes to obtain the cloud feedback slope and its uncertainty.
-    Radiative anomalies are regridded to a common spatial grid and optionally
-    restricted to a specific time range.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing radiative flux variables:
-        - 'rlut' : Outgoing longwave radiation at top of atmosphere (all-sky)
-        - 'rsut' : Reflected shortwave radiation (all-sky)
-        - 'rlutcs' : Outgoing longwave radiation (clear-sky)
-        - 'rsutcs' : Reflected shortwave radiation (clear-sky)
-
-    piok : xarray.Dataset
-        Reference climatology used to compute radiative anomalies.
-
-    fb_coef : dict
-        Dictionary of radiative feedback coefficients for non-cloud components
-        (Planck, albedo, water vapor, lapse rate).
-
-    surf_anomaly : xarray.DataArray
-        Global mean surface temperature anomalies used for regression.
-        Expected to be pre-processed as:
-        ```
-        gtas = ctl.global_mean(tas_anomaly).groupby('time.year').mean('time')
-        gtas = gtas.groupby((gtas.year-1)//10*10).mean()
-        ```
-
-    time_range : dict, optional
-        Time range for selecting data from `ds`, e.g.,
-        `{'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD'}`. Default is None
-        (full time range is used).
-
-    num : int, optional
-        Number of years to aggregate in regressions (default is 10).
-
-    Returns
-    -------
-    fb_cloud : float
-        Cloud radiative feedback strength (W/m²/K).
-
-    fb_cloud_err : float
-        Estimated standard error of the cloud feedback calculation (W/m²/K).
-    """
-  
-    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
-    
-    N = - experiment.ds['rlut'] - experiment.ds['rsut']
-    N0 = - experiment.ds['rsutcs'] - experiment.ds['rlutcs']
-    crf = (N0 - N) 
-
-    lat_target = np.linspace(-90, 90, 73)
-    lon_target = np.linspace(0, 357.5, 144)
-    crf = ctl.regrid_dataset(crf, lat_target, lon_target)
-
-    crf_glob = ctl.global_mean(crf).groupby('time.year').mean('time')
-    N_glob = ctl.global_mean(N).groupby('time.year').mean('time')
-    N0_glob = ctl.global_mean(N0).groupby('time.year').mean('time')
-    start_year = int(crf_glob.year.min()) 
-    crf_glob = crf_glob.groupby((crf_glob.year-start_year) // num * num).mean()
-    start_year = int(N_glob.year.min()) 
-    N_glob = N_glob.groupby((N_glob.year-start_year) // num * num).mean()
-    start_year = int(N0_glob.year.min()) 
-    N0_glob = N0_glob.groupby((N0_glob.year-start_year) // num * num).mean()
-
-    res_N = stats.linregress(surf_anomaly, N_glob)
-    res_N0 = stats.linregress(surf_anomaly, N0_glob)
-    res_crf = stats.linregress(surf_anomaly, crf_glob)
-
-    F0 = res_N0.intercept + control.ds_clim[('rlutcs')] + control.ds_clim[('rsutcs')] 
-    F = res_N.intercept + control.ds_clim[('rlut')] + control.ds_clim[('rsut')]
-    F0.compute()
-    F.compute()
-
-    F_glob = ctl.global_mean(F)
-    F0_glob = ctl.global_mean(F0)
-    F_glob = F_glob.compute()
-    F0_glob = F0_glob.compute()
-
-    fb_cloud = -res_crf.slope + np.nansum([fb_coef[( 'clr', fbn)].slope - fb_coef[('cld', fbn)].slope for fbn in fbnams]) #letto in Caldwell2016
-
-    fb_cloud_err = np.sqrt(res_crf.stderr**2 + np.nansum([fb_coef[('cld', fbn)].stderr**2 for fbn in fbnams]))
-
-    
-    return fb_cloud, fb_cloud_err
-
-def feedback_cloud_interannual(experiment, control, fb_coef, surf_anomaly, running_years=25):
-    """
-    Compute interannual cloud radiative feedback and associated error.
-
-    This function calculates cloud feedback on interannual timescales by first
-    removing multi-year running mean trends from radiative fluxes and temperature
-    anomalies. It performs linear regression between detrended global mean
-    surface temperature anomalies and detrended cloud radiative fluxes
-    (difference between all-sky and clear-sky net radiation) to estimate the
-    cloud feedback slope and its uncertainty.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing radiative flux variables:
-        - 'rlut' : Outgoing longwave radiation at top of atmosphere (all-sky)
-        - 'rsut' : Reflected shortwave radiation (all-sky)
-        - 'rlutcs' : Outgoing longwave radiation (clear-sky)
-        - 'rsutcs' : Reflected shortwave radiation (clear-sky)
-
-    piok : xarray.Dataset
-        Reference climatology dataset used for baseline radiative fluxes.
-
-    fb_coef : dict
-        Dictionary of radiative feedback coefficients for non-cloud components
-        (Planck, albedo, water vapor, lapse rate) used in the cloud feedback
-        calculation.
-
-    surf_anomaly : xarray.DataArray
-        Global mean surface temperature anomalies (detrended) used for regression.
-
-    time_range : dict, optional
-        Time range for selecting data from `ds`, e.g.,
-        `{'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD'}`. Default is None
-        (full time range is used).
-
-    running_years : int, optional
-        Number of years to apply running mean for detrending interannual
-        variations (default is 25 years).
-
-    Returns
-    -------
-    fb_cloud : float
-        Interannual cloud radiative feedback strength (W/m²/K).
-
-    fb_cloud_err : float
-        Estimated standard error of the interannual cloud feedback calculation
-        (W/m²/K).
-    """
-
-    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
-
-    N = - experiment.ds['rlut'] - experiment.ds['rsut']
-    N0 = - experiment.ds['rsutcs'] - experiment.ds['rlutcs']
-
-    crf = (N0 - N) 
-    crf = crf.groupby('time.year').mean('time')
-
-    N = N.groupby('time.year').mean('time')
-    N0 = N0.groupby('time.year').mean('time')
-
-    crf_glob = ctl.global_mean(crf).compute()
-    trend_crf_glob = calc_inter(crf_glob, running_years)
-    N_glob = ctl.global_mean(N).compute()
-    trend_N_glob = calc_inter(N_glob, running_years)
-    N0_glob = ctl.global_mean(N0).compute()
-    trend_N0_glob = calc_inter(N0_glob, running_years)
-    
-
-    res_N = stats.linregress(surf_anomaly, trend_N_glob)
-    res_N0 = stats.linregress(surf_anomaly, trend_N0_glob)
-    res_crf = stats.linregress(surf_anomaly, trend_crf_glob)
-
-    F0 = res_N0.intercept + control.ds_clim[('rlutcs')] + control.ds_clim[('rsutcs')] 
-    F = res_N.intercept + control.ds_clim[('rlut')] + control.ds_clim[('rsut')]
-    F0.compute()
-    F.compute()
-
-    F_glob = ctl.global_mean(F)
-    F0_glob = ctl.global_mean(F0)
-    F_glob = F_glob.compute()
-    F0_glob = F0_glob.compute()
-
-    fb_cloud = -res_crf.slope + np.nansum([fb_coef[( 'clr', fbn)].slope - fb_coef[('cld', fbn)].slope for fbn in fbnams]) #letto in Caldwell2016
-
-    fb_cloud_err = np.sqrt(res_crf.stderr**2 + np.nansum([fb_coef[('cld', fbn)].stderr**2 for fbn in fbnams]))
-
-    
-    return fb_cloud, fb_cloud_err
+    }    
 
 
 def single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_mask=True, save_pattern=False, num=10):
@@ -2605,7 +2234,10 @@ def single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_
     start_year = int(gtas.year.min()) 
     gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
     
-    path = os.path.join(cart_out, "dRt_"+name+"_global_clr.nc")
+    if name != 'cloud':
+        path = os.path.join(cart_out, "dRt_"+name+"_global_clr.nc")
+    else:
+        path = os.path.join(cart_out, "dRt_"+name+"_global.nc")
     if not os.path.exists(path):
         print('Using '+name + ' radiation anomalies function')
         if name=='albedo':
@@ -2622,14 +2254,23 @@ def single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_
 
         elif name=='lapse-rate':
             Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
+        
+        elif name == 'cloud':
+            Rad_anomaly_cloud(experiment, control, cart_out)
     
     fb=dict()
-    for tip in ['clr', 'cld']:
-        feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+".nc",  decode_times=time_coder)
+    if name!='cloud':
+        for tip in ['clr', 'cld']:
+            feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+".nc",  decode_times=time_coder)
+            start_year = int(feedbacks.year.min())
+            feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
+
+            res = stats.linregress(gtas, feedback)
+            fb[(tip, name)] = res
+    else:
+        feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global.nc",  decode_times=time_coder)
         start_year = int(feedbacks.year.min())
         feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
-
-        res = stats.linregress(gtas, feedback)
-        fb[(tip, name)] = res
+        fb = stats.linregress(gtas, feedback)
 
     return fb
