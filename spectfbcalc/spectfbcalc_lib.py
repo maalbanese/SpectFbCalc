@@ -328,8 +328,8 @@ class Experiment:
     
     def Net_TOA(self):
         print('Creating Net TOA variables')
-        self.ds['Net'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut']
-        self.ds['Net0'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs']
+        self.ds['Net'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut'] #net_toa_allsky
+        self.ds['Net0'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs'] #net_toa_clr
  
     
     def check_albedo(self) -> None:
@@ -598,7 +598,7 @@ def load_spectral_kernel(cart_k: str):
             fpath = os.path.join(sky_dir, fname)
             if not os.path.exists(fpath):
                 raise FileNotFoundError(f"Missing spectral kernel file: {fpath}")
-            ds = xr.open_dataset(fpath, chunks="auto")
+            ds = xr.open_dataset(fpath, chunks={"freq":1, 'time':'auto'})
             # explicitly tag the month (temporary time-like dimension)
             ds = ds.expand_dims(time=[month])
             ds_months.append(ds)
@@ -1693,7 +1693,7 @@ def Rad_anomaly_cloud(experiment, control, cart_out):
 
     dRt = open_dRt(cart_out, names=dRt_nocloud)
 
-    dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud])#Finisci di scrivere
+    dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud])
     cloud = dRt_cloud.compute()
     cloud.name='cloud'
     cloud.to_netcdf(cart_out + "dRt_cloud_global.nc", format="NETCDF4")
