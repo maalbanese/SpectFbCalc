@@ -1,10 +1,11 @@
-ece3:
-  rename_map:
-    # variable to rename
-  compute_map:
-    # variable to compute
+# Provide a dict {'std_var': 'exp_var'}, where std_var follow CMOR standard.
+# if "alb" not available: STD_VARS_NOALB = {"hus", "rlut", "rlutcs", "rsut", "rsutcs", "ta", "tas", "ts", "rsds", "rsus"}
+# else: STD_VARS = {"hus", "rlut", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
+ece3_abrupt:
+  rename_map: # example # variable to rename
+      hus: 'q'
+      ta: 't'
+
 ece4:
   rename_map:
-    # variable to rename
-
-# to be completed as needed
+  # variable to rename

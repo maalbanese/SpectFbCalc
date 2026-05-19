@@ -27,19 +27,520 @@ from difflib import get_close_matches
 import dask
 import psutil
 from xarray import unify_chunks
-
-
+ 
+from pathlib import Path
+from cdo import Cdo
 
 ######################################################################
-### Functions
-dask.config.set(scheduler='single-threaded')
+### Functions 
+time_coder = xr.coders.CFDatetimeCoder(use_cftime = True)
+
+STD_VARS = {"hus", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
+STD_VARS_LOGQ = {"hus_log", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
+STD_VARS_NOALB = {"hus", "rlut", "rsdt", "rlutcs", "rsut", "rsutcs", "ta", "tas", "ts", "rsds", "rsus"}
+
+
+def regrid(ds, target_ds):
+    """
+    Wrapper to ctl.regrid, to avoid data array loses name
+    """
+    coso = ctl.regrid_dataset(ds, target_ds.lat, target_ds.lon)
+    coso.name = ds.name
+    return coso
+
+
+
+class Kernel:
+    """
+    Loads the kernels and the additional information needed.  
+    
+    ----------
+    name : one among "HUANG", "ERA5", "SPECTRAL"
+    """
+ 
+    def __init__(self, name, config = None, path_input = None, filename_template = None) -> None:
+        if name not in ['HUANG', 'ERA5', 'SPECTRAL']:
+            raise ValueError(f'kernel name {name} not supported')
+            
+        self.name = name
+        if config is not None:
+            self.cart_k = config['kernels'][name]['path_input']
+            self.filename_template = config['kernels'][name]['filename_template']
+        else:
+            if path_input is None: raise ValueError(f"config is None and path_input not provided for kernel {self.name}")
+            if filename_template is None: raise ValueError(f"config is None and filename_template not provided for kernel {self.name}")
+            self.cart_k = path_input
+            self.filename_template = filename_template
+
+        print(f"Loading kernel: {name}")
+        self.kernel, self.dp = load_kernel(self.name, self.cart_k, finam = self.filename_template)
+
+        self.use_log_wv = False
+        if self.name in ['HUANG']: # Add here other kernels that need hus_log
+            self.use_log_wv = True
+
+        if self.name in ['HUANG', 'ERA5']:
+            self.dp = self.dp/100. # in units of 100 hPa
+
+
+    def recompute_dp(self, experiment) -> None:
+        """
+        Recomputes the atmospheric layers based on the model's surface pressure.
+
+        experiment is an Experiment instance
+        """
+
+        if "surf_pressure" not in experiment.ds:
+            print(f"Surface pressure not available in experiment {experiment.name}, using default dp for kernel {self.name}")
+            return
+
+        if self.dp is None:
+            raise ValueError(f"Cannot recompute dp for kernel {self.name}: dp not available")
+            
+        # Surface mask
+        wid_mask = np.empty([len(self.dp.plev)] + list(experiment.surf_pressure.shape))
+        
+        for ila in range(len(experiment.surf_pressure.lat)):
+            for ilo in range(len(experiment.surf_pressure.lon)):
+                ind = np.where((experiment.surf_pressure[ila, ilo].values - self.dp.plev.values) > 0)[0][0]
+                wid_mask[:ind, ila, ilo] = np.nan
+                wid_mask[ind, ila, ilo] = experiment.surf_pressure[ila, ilo].values - self.dp.plev.values[ind]
+                wid_mask[ind+1:, ila, ilo] = self.dp.values[ind+1:]
+
+        k = self.kernel[('clr', 't')]
+        wid_mask = xr.DataArray(wid_mask, dims = k.dims[1:], coords = k.drop('month').coords)
+
+        if self.name in ['HUANG', 'ERA5']:
+            self.dp = wid_mask/100. # in units of 100 hPa
+        else:
+            self.dp = wid_mask
+
+
+    def __repr__(self) -> str:
+        return (
+            f"Kernel(\n"
+            f"  name      = {self.name!r}\n"
+            f"  cart_k = {self.cart_k}\n"
+            f"  available kernels = {self.kernel.keys()}\n"
+            f")"
+        )
+
+ 
+class Experiment:
+    """
+    Loads the data of a specific experiment.  
+    
+    ----------
+    name : str
+        An identifying name for the experiment (e.g. {model}_{member}_{exp_type})
+    variables : set[str]
+        Climate variable names tracked by this instance.
+    dataset : xr.Dataset
+        Merged lazy dataset of remapped data populated by `load_remapped`.
+    """
+ 
+    def __init__(self, name, orig_dir, remap_dir = "remapped", raw_variables = STD_VARS_NOALB, time_chunk = 20, variable_mapping = None) -> None:
+        self.name: str = name
+        self.raw_variables: set[str] | list[str] | tuple[str] = raw_variables
+        
+        self.orig_dir: Path = Path(orig_dir)
+        self.remap_dir: Path = Path(remap_dir)
+
+        self.remap_dir.mkdir(parents=True, exist_ok=True)
+        self.chunks = {'time': time_chunk}
+        self.chunks_remap = {'time': 120} # this is for remapped data
+
+        if variable_mapping is None:
+            self.variable_mapping = {var: var for var in self.raw_variables}
+        else:
+            self.variable_mapping = variable_mapping
+
+        self.load_file_dict()
+        self.raw_data = dict()
+        self.ds = xr.Dataset()
+        self.ds_anom = xr.Dataset()
+        self.ds_clim = xr.Dataset()
+ 
+    # ------------------------------------------------------------------
+    # 1. Lazy loading of raw DataArrays
+    # ------------------------------------------------------------------
+    def load_file_dict(self):
+        file_dict = {}
+        for var in self.raw_variables:
+            pattern = f"{self.variable_mapping[var]}/{self.variable_mapping[var]}*.nc"
+            file_dict[var] = sorted(self.orig_dir.glob(pattern)) # does not work with **/* with symlinks!
+
+        self.file_dict = file_dict
+
+    # def load_file_dict(self):
+    #     file_dict = {}
+    #     for var in self.raw_variables:
+    #         pattern = f"{self.variable_mapping[var]}/{self.variable_mapping[var]}*.nc"
+    #         matches = []
+    #         for d in self.orig_dir:  # orig_dir is now always a list
+    #             matches.extend(d.glob(pattern))
+    #         file_dict[var] = sorted(matches)
+    #     self.file_dict = file_dict
+
+ 
+    def load_raw(self) -> None:
+        """
+        Lazily open each file in *file_dict* as an xr.DataArray and store
+        them in ``self.raw_data``.
+ 
+        Parameters
+        ----------
+        file_dict : list of path-like
+            Paths to NetCDF files.
+        """
+        print('Loading raw data...')
+
+        # self.raw_data = {var: xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
+        #     for var in self.raw_variables
+        # }
+        self.raw_data = {}
+        for var in self.raw_variables:
+            print(var)
+            self.raw_data[var] = xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
+ 
+    # ------------------------------------------------------------------
+    # 2. CDO remapping to a target grid
+    # ------------------------------------------------------------------
+ 
+    def remap(self, target_ds: xr.Dataset, save_remapped = False) -> None:
+        """
+        Interpolates to target_ds (the kernel ds).
+ 
+        Parameters
+        ----------
+        target_ds
+
+        save_rempped
+        """
+
+        ### Improve! use smmregrid instead. compatibility with gaussian reduced/curvilinear?
+        remapped = {var: regrid(self.raw_data[var], target_ds) for var in self.raw_variables}
+
+        # compute and save
+        if save_remapped:
+            print("Saving remapped to disk")
+            for var in remapped:
+                print(var)
+                remapped[var] = remapped[var].compute().to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
+            
+        self.ds = xr.merge([remapped[var] for var in remapped])
+
+
+
+    def remap_cdo(
+        self,
+        target_grid_file: str | Path,
+        method: str = "remapbil",
+    ) -> None:
+        """
+        Interpolate each file in *file_dict* to the grid of *target_grid_file*
+        using CDO Python bindings and write results to ``self.remap_dir``.
+ 
+        Parameters
+        ----------
+        file_dict : list of path-like
+            Source files to be remapped.
+        target_grid_file : path-like
+            NetCDF file whose grid defines the target resolution.
+        method : str
+            CDO remapping operator: ``"remapbil"`` (default), ``"remapcon"``,
+            ``"remapnn"``, etc.
+        """
+        target_grid_file = str(target_grid_file)
+
+        cdo = Cdo()
+        remap_fn = cdo(method)
+ 
+        for var in self.file_dict:
+            for src_file in self.file_dict[var]:
+                dst_file = self.remap_dir / src_file.name
+                remap_fn(target_grid_file, input=src_file, output=dst_file)
+
+    
+    def vertical_interp(self, target_ds):
+        print('check vertical dimension')
+        self.ds = check_vertical(self.ds)
+        self.ds = self.ds.interp(plev = target_ds.plev)
+
+    # ------------------------------------------------------------------
+    # 3. Load remapped data into a merged, lazy Dataset
+    # ------------------------------------------------------------------
+ 
+    def load_remapped(self) -> None:
+        """
+        Lazily read all remapped files in ``self.remap_dir`` and merge them
+        into a single xr.Dataset stored in ``self.dataset``.
+ 
+        Parameters
+        ----------
+        pattern : str
+            Glob pattern to discover files inside ``self.remap_dir``.
+        """
+
+        pattern = f"*_{self.name}_remapped.nc"
+        files = sorted(self.remap_dir.glob(pattern))
+        if len(files) > 0:
+            self.ds = xr.open_mfdataset(files, combine = "by_coords", decode_times=time_coder, chunks = self.chunks_remap, preprocess = preproc)
+        else:
+            raise ValueError('No remapped dataset found on disk!')
+            # Alternatively, can compute them from raw
+
+    def check_remapped(self) -> None:
+        """
+        Check if remapped files are there.
+
+        IMPROVE: check that all variables are there
+        """
+
+        pattern = f"*_{self.name}_remapped.nc"
+        files = sorted(self.remap_dir.glob(pattern))
+        if len(files) > 0:
+            print(f'{self.name} already remapped')
+            return True
+        else:
+            return False
+
+
+    def load_surf_pressure(self, pressure_path, target_ds) -> None:
+        """
+        Loads surface pressure to compute atmospheric layers.
+        Interpolates to kernel grid
+        """
+        if pressure_path:  # If pressure data is specified, load it
+            print("Loading surface pressure data...")
+            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
+            if not ps_files:
+                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
+            
+            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords', decode_times=time_coder)
+        
+        psclim = surf_pressure.groupby('time.month').mean(dim='time')
+        psye = psclim['ps'].mean('month')
+        
+        psye_rg = regrid(psye, target_ds).compute()
+
+        self.surf_pressure = psye_rg
+    
+    def Net_TOA(self):
+        print('Creating Net TOA variables')
+        self.ds['Net'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut'] #net_toa_allsky
+        self.ds['Net0'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs'] #net_toa_clr
+ 
+    
+    def check_albedo(self) -> None:
+        """
+        Checks if the albedo is loaded.
+        """
+
+        if not self.ds:
+            raise ValueError('Remapped data not loaded (self.ds is empty)')
+    
+        if 'alb' in self.ds.data_vars:
+            print('alb already in ds')
+        else:
+            if 'rsus' and 'rsds' in self.ds:
+                print("Computing albedo from rsus and rsds")
+                albedo = self.ds['rsus']/self.ds['rsds']
+                self.ds['alb'] = albedo.where(albedo > 0., 0.)
+
+                del self.ds['rsus']
+                del self.ds['rsds']
+            else:
+                raise ValueError('alb or rsus or rsds not found in ds! Cannot compute albedo. Vars in ds: ', self.ds.data_vars)
+
+
+    def check_hus_log(self) -> None:
+        """
+        Checks if hus_log is in ds.
+        """
+
+        if not self.ds:
+            raise ValueError('Remapped data not loaded (self.ds is empty)')
+    
+        if 'hus_log' in self.ds.data_vars:
+            print('hus_log already in ds')
+        else:
+            print('Applying log to hus')
+            self.ds['hus_log'] = da.log(self.ds['hus'])
+            del self.ds['hus']
+
+
+    def check_vars(self, variables = STD_VARS_LOGQ) -> None:
+        """
+        Checks if all variables needed are loaded. 
+        """
+
+        if not self.ds:
+            raise ValueError('Remapped data not loaded (self.ds is empty)')
+        
+        if 'alb' in variables: self.check_albedo()
+        if 'hus_log' in variables: self.check_hus_log()
+        self.Net_TOA()
+
+        for var in variables:
+            if var in self.ds:
+                print(f"{var} loaded")
+            else:
+                print(f'missing {var}!')
+
+        self.variables = variables
+    
+    def check_time_range(self, config):
+        time_range=config['time_range_exp']
+        if time_range is not None:
+            self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
+        
+
+
+    def compute_clim(self, time_range = None, compute = True):
+        """
+        Computes climatology. If time_range is provided, select a period.
+        """
+        self.ds_clim = compute_climatology(self.ds, time_range=time_range)
+
+        if compute:
+            self.ds_clim = self.ds_clim.compute()
+
+
+    def compute_runmean(self, window_years = 21, time_range = None, compute = True):
+        """
+        Computes running mean of dataset.
+        """
+        self.ds_clim = compute_running_mean(self.ds, window_years=window_years, time_range = time_range)
+
+        if compute:
+            self.ds_clim = self.ds_clim.compute()
+
+
+    def compute_anom_clim(self, control):
+        """
+        Removes monthly climatology from a control run.
+        """
+
+        from importlib.util import find_spec
+    
+        if find_spec("flox") is not None:
+            # Use groupby
+            self.ds_anom = self.ds.groupby('time.month') - control.ds_clim
+            self.ds_anom = self.ds_anom.chunk(self.ds.chunks)
+        else:
+            # Expand to avoid groupby
+            self.ds_anom = self.ds - expand_clim(control.ds_clim, self.ds)
+
+
+    def compute_anom_aligned(self, control):
+        """
+        Removes climatology from a control run, aligning the time axis (experiment and climatology need to have the same length!).
+        """
+
+        check_time_axis(self.ds, control.ds_clim)
+        clim_aligned = control.ds_clim.drop("time")
+        clim_aligned["time"] = self.ds["time"]
+        self.ds_anom = self.ds - clim_aligned
+        
+    
+    def check_lazy_loading(self):
+        check_lazy_loading(self.ds)
+        
+ 
+    def __repr__(self) -> str:
+        return (
+            f"Experiment(\n"
+            f"  name      = {self.name!r}\n"
+            f"  variables (raw) = {self.raw_variables}\n"
+            f"  variables = {self.variables}\n"
+            f"  remap_dir  = {self.remap_dir}\n"
+            f"  raw_data = {len(self.raw_data)} DataArray(s)\n"
+            f"  ds    = {list(self.ds.data_vars)}\n"
+            f"  ds_anom    = {list(self.ds_anom.data_vars)}\n"
+            f"  ds_clim    = {list(self.ds_clim.data_vars)}\n"
+            f")"
+        )
+
+
+def expand_clim(ds_clim, ds):
+    """
+    Expand a climatology along the time axis (to avoid groupby).
+    without Flox, the groupby creates: PerformanceWarning: Slicing with an out-of-order index is generating 165 times more chunks
+    """
+    # Build a month coordinate from your data's time axis
+    months = ds.time.dt.month
+    # Index into the climatology and assign time as the new coordinate
+    # ds_clim = ds_clim.chunk({'month': 12})
+    expanded = ds_clim.sel(month=months).drop_vars("month").assign_coords(time=ds.time).chunk(ds.chunks)
+
+    return expanded
+
+
+def compute_climatology(ds, time_range = None):
+    """
+    Computes climatology. If time_range is provided, select a period.
+    """
+    if time_range is not None:
+        ds_clim = ds.sel(time=slice(time_range['start'], time_range['end']))
+    else:
+        ds_clim = ds
+
+    ds_clim = ds_clim.groupby('time.month').mean()
+
+    return ds_clim
+
+
+def compute_running_mean(ds, window_years = 21, time_range = None):
+    """
+    Computes running mean of dataset.
+    """
+    if time_range is not None:
+        ds_clim = ds.sel(time=slice(time_range['start'], time_range['end']))
+
+    ds_clim = ctl.running_mean(ds_clim, window_years*12)
+
+    return ds_clim
+
+
+def compute_anomalies(exp, control, method="climatology", window_years=21, time_range_clim = None):
+    """
+    Compute anomalies between a variable and its climatology/reference.
+
+    Parameters
+    ----------
+    exp : Experiment instance for 4x
+    control : Experiment instance for picontrol
+    method : str, default "monthly"
+        Method for anomaly computation:
+        - "climatology"            : monthly averaged climatology to calculate the anomaly
+        - "running_mean"              : running mean climatology to calculate the anomaly 
+    window_years : int, default 21
+        Num of years used for running mean
+    """
+
+    if method == "climatology":
+        control.compute_clim(time_range = time_range_clim, compute = True)
+        exp.compute_anom_clim(control)
+
+    elif method == "running_mean":
+        control.compute_runmean(window_years = window_years, compute = True)
+        exp.compute_anom_aligned(control)
+    else:
+        raise ValueError(f"Unknown anomaly method {method}")
+
+
+
+
+
+################################################################################################
 
 def mytestfunction():
     print('test!')
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str, cart_out: str):
+def load_spectral_kernel(cart_k: str):
     """
     Loads and preprocesses spectral kernels for further analysis.
 
@@ -55,9 +556,6 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
         Base path containing spectral kernel subdirectories:
         - clear_sky_fluxes/
         - all_sky_fluxes/
-
-    cart_out : str
-        Output directory for pickled kernel objects.
 
     version : str, optional
         Kernel version string (default: "v3").
@@ -100,7 +598,7 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
             fpath = os.path.join(sky_dir, fname)
             if not os.path.exists(fpath):
                 raise FileNotFoundError(f"Missing spectral kernel file: {fpath}")
-            ds = xr.open_dataset(fpath, chunks="auto")
+            ds = xr.open_dataset(fpath, chunks={"freq":1, 'time':'auto'})
             # explicitly tag the month (temporary time-like dimension)
             ds = ds.expand_dims(time=[month])
             ds_months.append(ds)
@@ -133,13 +631,11 @@ def load_spectral_kernel(cart_k: str, cart_out: str):
 
     for (tip, vname), da in allkers.items():
         ds_out[f"{tip}_{vname}"] = da
-    pickle.dump(allkers, open(os.path.join(cart_out, "allkers_SPECTRAL.p"), "wb"))
-    pickle.dump(vlevs, open(os.path.join(cart_out, "vlevs_SPECTRAL.p"), "wb"))
     
-    return allkers
+    return allkers, None # no dp
 
 
-def load_kernel_ERA5(cart_k, cart_out, finam):
+def load_kernel_ERA5(cart_k, finam):
     """
     Loads and preprocesses ERA5 kernels for further analysis.
 
@@ -195,6 +691,7 @@ def load_kernel_ERA5(cart_k, cart_out, finam):
             if vna=='wv_sw_dp':
                 ker=ker.rename({'level': 'plev'})
                 vna='wv_sw'
+                
             if tip=='clr':
                 stef=ker.TOA_clr
             else:
@@ -204,10 +701,11 @@ def load_kernel_ERA5(cart_k, cart_out, finam):
     
     vlevs = xr.load_dataset( cart_k+'dp_era5.nc')
     vlevs=vlevs.rename({'level': 'plev', 'latitude': 'lat', 'longitude': 'lon'})
-    pickle.dump(vlevs, open(cart_out + 'vlevs_ERA5.p', 'wb'))
-    return allkers
 
-def load_kernel_HUANG(cart_k, cart_out, finam):
+    return allkers, vlevs.dp
+
+
+def load_kernel_HUANG(cart_k, finam):
     """
     Loads and processes climate kernel datasets (from HUANG 2017), and saves specific datasets to pickle files.
 
@@ -254,79 +752,13 @@ def load_kernel_HUANG(cart_k, cart_out, finam):
 
     vlevs = xr.load_dataset( cart_k + 'dp.nc')  
     vlevs=vlevs.rename({'player': 'plev'})
-    pickle.dump(vlevs, open(cart_out + 'vlevs_HUANG.p', 'wb'))
-
-    return allkers
-
-def load_kernel_wrapper(ker, config_file: str):
-    """
-    Loads and processes climate kernel datasets, and saves specific datasets to pickle files.
-
-    Parameters:
-    -----------
-
-    ker (str): 
-        The name of the kernel to load (e.g., 'ERA5' or 'HUANG').
-
-    cart_k : str
-        Path template to the kernel dataset files. 
-        Placeholders should be formatted as `{}` to allow string formatting.
-        
-    cart_out : str
-        Path template to save the outputs. 
     
-    Returns:
-    --------
-    allkers : dict
-        A dictionary containing the preprocessed kernels. The dictionary keys are tuples of the form `(tip, variable)`, where:
-        - `tip`: Atmospheric condition ('clr' for clear-sky, 'cld' for all-sky).
-        - `variable`: Name of the variable (`'t'` for temperature, `'ts'` for surface temperature, `'wv_lw'`, `'wv_sw'`, `'alb'`).
+    return allkers, vlevs.dp
 
-    Saved Files:
-    ------------
-    - **`vlevs_ker.p`**: Pickle file containing the pressure levels (`player`).
-    - **`cose_ker.p`**: Pickle file containing the pressure levels scaled to hPa.
-    - **`allkers_ker.p`**: Pickle file containing all preprocessed kernels.
 
+def load_kernel(ker, cart_k, finam=None):
     """
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-
-    if ker == 'ERA5':
-        cart_k  = config['kernels']['era5']['path_input']
-        cart_out = config['kernels']['era5']['path_output']
-        finam     = config['kernels']['era5']['filename_template']
-        allkers = load_kernel(ker, cart_k, cart_out, finam)
-
-    elif ker == 'HUANG':
-        cart_k  = config['kernels']['huang']['path_input']
-        cart_out = config['kernels']['huang']['path_output']
-        finam   = config['kernels']['huang']['filename_template']
-        allkers = load_kernel(ker, cart_k, cart_out, finam)
-
-    elif ker == 'SPECTRAL':
-        cart_k  = config['kernels']['spect']['path_input']
-        cart_out = config['kernels']['spect']['path_output']
-        # NO finam
-        allkers = load_kernel(ker, cart_k, cart_out)
-
-    else:
-        raise ValueError(f"Unknown kernel type: {ker}")
-
-    return allkers
-
-def load_kernel(ker, cart_k, cart_out, finam=None):
-    """
-    Selects and loads radiative kernels from different sources.
-
-    This function acts as a unified interface for loading and preprocessing
-    radiative kernels from multiple datasets: ERA5, HUANG, and SPECTRAL.
-    It dispatches the loading task to the corresponding specialized routine
-    based on the selected kernel type, and returns the processed kernel
-    dictionary.
+    Selects and loads radiative kernels from different sources: ERA5, HUANG, and SPECTRAL.
 
     Parameters:
     -----------
@@ -342,10 +774,6 @@ def load_kernel(ker, cart_k, cart_out, finam=None):
         Path to the directory containing the kernel NetCDF files for the
         selected dataset.
 
-    cart_out : str
-        Path to the directory where preprocessed kernels, metadata,
-        and auxiliary files will be saved by the underlying loader.
-
     finam : str
         Filename pattern used to locate the kernel files. It must include
         a formatting placeholder (e.g., `'ERA5_kernel_{}_TOA.nc'`,
@@ -355,86 +783,206 @@ def load_kernel(ker, cart_k, cart_out, finam=None):
     Returns:
     --------
     allkers : dict
-        A dictionary containing the preprocessed kernels produced by the
-        selected loader. The structure of the dictionary depends on the
-        kernel dataset:
-        - ERA5     → keys of the form `(tip, variable)`
-        - HUANG    → structure defined in `load_kernel_HUANG`
-        - SPECTRAL → keys of the form `(tip, variable)` with spectral
-                      frequency selection applied
+        A dictionary containing the kernels. Keys are: `(tip, variable)`.
+        
+    ### IMPROVE: return a dataset instead of a dict
 
-    Notes:
-    ------
-    - This function does not perform preprocessing directly; all variable
-      renaming, frequency selection, and file saving are handled inside
-      the specific loader.
-    - If an unsupported kernel name is provided, the function will fail
-      silently unless additional validation is added.
+    dp : xr.DataArray
+        The width of the atmospheric layers in units of 100 hPa.
     """
     if ker == 'ERA5':
-        return load_kernel_ERA5(cart_k, cart_out, finam)
+        return load_kernel_ERA5(cart_k, finam)
 
     elif ker == 'HUANG':
-        return load_kernel_HUANG(cart_k, cart_out, finam)
+        return load_kernel_HUANG(cart_k, finam)
 
     elif ker == 'SPECTRAL':
-        return load_spectral_kernel(cart_k, cart_out)
-
+        return load_spectral_kernel(cart_k)
     else:
         raise ValueError(f"Unsupported kernel type: {ker}")
 
+#################################################################################################
 
-###### LOAD AND CHECK DATA
-def read_data(config_file: str, variable_mapping_file: str = "configvariable.yml") -> xr.Dataset:
+def load_config(config_file, variable_mapping_file = None):
     """
-    Reads the configuration from the YAML file, opens the NetCDF file specified in the config,
-    and standardizes the variable names in the dataset.
-    
-    Parameters:
-    -----------
-    config_file : str
-        The path to the YAML configuration file.
-    
-    variable_mapping_file : str
-        Path to the YAML file that contains renaming and computation rules.
-    
-    Returns:
-    --------
-    ds : xarray.Dataset
-        The dataset with standardized variable names.
+    Loads the configuration from config_file, returns a dict. Creates output directory.
     """
+    
+    with open(config_file, 'r') as file:
+        config = yaml.safe_load(file)
 
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
+    reference_dataset = config['file_paths']['reference_dataset']
+    # if not isinstance(reference_dataset, list):
+    #     reference_dataset = [reference_dataset]
+    # config['file_paths']['reference_dataset'] = [Path(p) for p in reference_dataset]
+
+    experiment_dataset = config['file_paths']['experiment_dataset']
+    # if not isinstance(experiment_dataset, list):
+    #     experiment_dataset = [experiment_dataset]
+    # config['file_paths']['experiment_dataset'] = [Path(p) for p in experiment_dataset]
+
+    exp_name = config['exp_name']
+    # if not isinstance(exp_name, list):
+    #     exp_name = [exp_name]
+    # config['exp_name'] = exp_name
+    
+    cart_out = config['file_paths'].get("output")
+    ## Create dirs
+    cart_out_exp = cart_out + f'/{exp_name}/'
+    os.makedirs(cart_out_exp, exist_ok=True)
+    config['cart_out_exp'] = cart_out_exp
+    
+    method = config.get("anomaly_method")
+    if method is None:
+        method = "climatology"
+        print("The config file does not specify 'anomaly_method' (e.g., 'climatology', 'running_mean'), assuming 'climatology'.")
+    
+    config["anomaly_method"] = method
+
+    #### qui mkdir e cart_out differenziate
+    use_atm_mask=config.get("use_atm_mask", True)
+    save_pattern = config.get("save_pattern", False)
+    
+    config['use_atm_mask'] = bool(use_atm_mask)
+    config['save_pattern'] = bool(save_pattern)
+    config['num_year_regr'] = config.get("num_year_regr", 10)
+
+    # Read time ranges from config
+    time_range_clim = config.get("time_range_clim", {})
+    time_range_exp = config.get("time_range_exp", {})
+    # Validate and clean time ranges
+    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
+    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
+    
+    print(f"Time range for climatology: {time_range_clim if time_range_clim else "all"}")
+    print(f"Time range for experiment: {time_range_exp if time_range_exp else "all"}")
+    config['time_range_exp'] = time_range_exp
+    config['time_range_clim'] = time_range_clim
+
+    # Surface pressure management
+    config['pressure_path'] = config['file_paths'].get('pressure_data', None)
+
+    # Load variable mapping for non-CMOR names
+    if variable_mapping_file is not None:
+        variable_map = load_variable_mapping(variable_mapping_file, config['exp_name'])['rename_map']
+        config['variable_mapping'] = variable_map
     else:
-        config = config_file 
+        config['variable_mapping'] = None
 
-    file_path1 = config['file_paths'].get('experiment_dataset', None)
-    file_path2 = config['file_paths'].get('experiment_dataset2', None)
-    file_pathpl = config['file_paths'].get('experiment_dataset_pl', None)
-    time_chunk = config.get('time_chunk', None)
-    dataset_type = config.get('dataset_type', None)
+    return config
 
 
-    if not file_path1:
-        raise ValueError("Error: The 'experiment_dataset' path is not specified in the configuration file")
-
+def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None):
+    """
+    All the preprocessing needed before calling the feedback calculations:
+        - Reads experiment, control and kernels;
+        - Remaps to kernel resolution;
+        - Computes climatology;
+        - Computes anomalies;
+        - Computes width of atm layers for kernel;
+    """
     
-    ds_list = [xr.open_mfdataset(file_path1, combine='by_coords', use_cftime=True, chunks={'time': time_chunk})]
- 
-    if file_path2 and file_path2.strip():
-        ds_list.append(xr.open_mfdataset(file_path2, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
+    # load config
+    config = load_config(config_file, variable_mapping_file = variable_mapping_file)
 
-    if file_pathpl and file_pathpl.strip():
-        ds_list.append(xr.open_mfdataset(file_pathpl, combine='by_coords', use_cftime=True,  chunks={'time': time_chunk}))
+    # load kernel
+    kernel = Kernel(ker, config = config)
+    k = kernel.kernel[('clr', 't')]
 
-    # Merge dataset
-    ds = xr.merge(ds_list, compat="override")
+    if kernel.use_log_wv:
+        variables = STD_VARS_LOGQ
+    else:
+        variables = STD_VARS
+    
+    # load picontrol (+ remap)
+    print('\n -------> Loading control')
+    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'])
 
-    ds = standardize_names(ds, dataset_type, variable_mapping_file)
+    if control.check_remapped():
+        control.load_remapped()
+    else:
+        print(f"Remapped data not found in: {control.remap_dir}, computing from raw..")
+        control.load_raw()
 
-    return ds
+        control.remap(target_ds = k, save_remapped = True)
+    
+    control.check_vars(variables = variables)
+    control.vertical_interp(k)
+
+    # load 4x (+ remap)
+    print('\n -------> Loading experiment')
+    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'])
+    if experiment.check_remapped():
+        experiment.load_remapped()
+    else:
+        print(f"Remapped data not found in: {experiment.remap_dir}, computing from raw..")
+        experiment.load_raw()
+        experiment.remap(target_ds = k, save_remapped = True)
+
+    experiment.check_vars(variables = variables)
+    experiment.vertical_interp(k)
+    experiment.check_time_range(config)
+
+    # compute climatology and anomaly
+    method = config['anomaly_method']
+    print(f"\n -------> Computing {method} and anomalies")
+    
+    if method == 'climatology':
+        control.compute_clim(time_range = config['time_range_clim'], compute = True)
+        experiment.compute_anom_clim(control)
+    elif method == 'running_mean':
+        control.compute_runmean(window_years = config['num_running_years_trend'], time_range=config['time_range_clim'], compute = True)
+        experiment.compute_anom_aligned(control)
+    else:
+        raise ValueError(f"Unknown anomaly method {method}")
+
+    if ker == 'HUANG':
+        print(f"\n -------> Recomputing atm dp with surface pressure\n")
+        experiment.load_surf_pressure(config['pressure_path'], k)
+        kernel.recompute_dp(experiment)
+
+    print(f"\n ----------> Preprocessing complete for {config['exp_name']} <------------\n")
+
+    ### up to this point: everything still lazy!
+    return control, experiment, kernel
+
+
+def main_loop(config_file, ker = 'HUANG'):
+    control, experiment, kernel = preprocess_data(config_file, ker)
+
+    ### Calc feedbacks
+
+    return
+
+
+###############################################################################################
+
+
+def check_lazy_loading(ds):
+    """Quick diagnostic for lazy loading status"""
+    import dask.array as da
+    
+    print("=== Lazy Loading Status ===")
+    for var in ds.data_vars:
+        is_lazy = isinstance(ds[var].data, da.Array)
+        status = "✓ Lazy" if is_lazy else "✗ LOADED"
+        if is_lazy:
+            size_mb = ds[var].nbytes / 1e6
+            n_chunks = ds[var].data.npartitions
+            print(f"{var:20s} {status:10s} ({size_mb:8.1f} MB, {n_chunks:4d} chunks)")
+        else:
+            print(f"{var:20s} {status:10s}")
+
+    try:
+        print(f"\nChunk structure:\n{ds.chunks}")
+    except ValueError as err:
+        print('Problem with chunks!')
+        print(err)
+        ds = xr.unify_chunks(ds)
+        print(f"\nChunk structure:\n{ds.chunks}")
+
+    return
+
 
 def load_variable_mapping(configvar_file, dataset_type):
     """Load variable mappings for the specified dataset type from YAML."""
@@ -442,58 +990,9 @@ def load_variable_mapping(configvar_file, dataset_type):
         config = yaml.safe_load(file)
     return config.get(dataset_type, {})
 
-def safe_eval(expr, ds):
-    """Safely evaluate a string expression using variables from the xarray dataset."""
-    local_dict = {var: ds[var] for var in ds.variables}
-    try:
-        return eval(expr, {"__builtins__": {}}, local_dict)
-    except Exception as e:
-        print(f"Failed to evaluate expression '{expr}': {e}")
-        return None
 
-def standardize_names(ds, dataset_type="ece3", configvar_file="configvariable.yml"):
-    """
-    Standardizes and computes variable names in the dataset using a config file.
 
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        The dataset to be standardized.
-    dataset_type : str
-        Either 'ece3', 'ece4', etc. depending on the mapping config.
-    config_file : str
-        Path to the YAML file with variable mappings.
-
-    Returns
-    -------
-    xarray.Dataset
-        Dataset with renamed and computed variables.
-    """
-    mapping = load_variable_mapping(configvar_file, dataset_type)
-    rename_map = mapping.get("rename_map", {}) or {}
-    compute_map = mapping.get("compute_map", {}) or {}
-
-    # Apply renaming
-    existing_renames = {old: new for old, new in rename_map.items() if old in ds.variables}
-    ds = ds.rename(existing_renames)
-    if existing_renames:
-        print(f"Renamed variables: {existing_renames}")
-    else:
-        print("No variables needed to be renamed.")
-
-     # Apply computed variables
-    for new_var, expr in compute_map.items():
-        if new_var not in ds:
-            result = safe_eval(expr, ds)
-            if result is not None:
-                ds[new_var] = result
-                print(f"Computed variable '{new_var}' using expression: {expr}")
-            else:
-                print(f"Failed to compute variable '{new_var}'")
-
-    return ds
-
-def check_data(ds, piok):
+def check_time_axis(ds, piok):
     if len(ds["time"]) != len(piok["time"]):
         raise ValueError("Error: The 'time' columns in 'ds' and 'piok' must have the same length. To fix use variable 'time_range' of the function")
     return
@@ -516,195 +1015,24 @@ def check_vertical(da):
 
 def preproc(ds):
     ds = ds.assign_coords(lat = ds.lat.round(4))
+    #ds = ds.assign_coords(lon = ds.lon.round(4))
     if 'lat_bnds' in ds:
         ds['lat_bnds'] = ds['lat_bnds'].round(4)
     
     return ds
 
 ######################################################################################
-#### Aux functions
-def ref_clim(config_file: str, allvars, ker, variable_mapping_file: str, allkers=None):
-    """
-    Computes the reference climatology using the provided configuration, variables, and kernel data.
-
-    Parameters:
-    -----------
-    config_file : str
-        The path to the YAML configuration file.
-    allvars : str
-        The variable to process (e.g., 'alb', 'rsus').
-    ker : dict
-        The preprocessed kernels.
-    variable_mapping_file : str
-        Path to the YAML file that contains renaming and computation rules.
-
-    Returns:
-    --------
-    piok : xarray.DataArray
-        The computed climatology (PI).
-    """
-
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-
-    dataset_type = config.get('dataset_type', None)
-    filin_pi = config['file_paths'].get('reference_dataset', None)
-    filin_pi_pl = config['file_paths'].get('reference_dataset_pl', None)
-    time_chunk = config.get('time_chunk', None)
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    
-    if not filin_pi:
-        raise ValueError("Error: the 'reference_dataset' path is not specified in the configuration file.")
-
-    ds_list = [xr.open_mfdataset(filin_pi, combine='by_coords', compat='no_conflicts', use_cftime=True, preprocess = preproc, chunks={'time': time_chunk})]
-    
-    if filin_pi_pl and filin_pi_pl.strip():
-        ds_list.append(xr.open_mfdataset(filin_pi_pl, combine='by_coords', use_cftime=True, chunks={'time': time_chunk}))
-
-    ds_ref = xr.merge(ds_list, compat="override")
-
-    ds_ref = standardize_names(ds_ref, dataset_type, variable_mapping_file)
-
-    time_range_clim = config.get("time_range", {})
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-
-    if allkers is None:  
-        allkers = load_kernel_wrapper(ker, config)
-    else:
-        print("Using pre-loaded kernels.")
-
-    if isinstance(allvars, str):
-        vars_to_process = [allvars]
-    else:
-        vars_to_process = allvars.copy() 
-
-    piok = {} 
-    for vnams in vars_to_process:
-        clim_method = "climatology" if vnams in ['rsut', 'rlut', 'rsutcs', 'rlutcs'] else method
-        piok[vnams] = climatology(ds_ref, allkers, vnams, time_range_clim, clim_method, time_chunk)
-
-    return piok
-
-def climatology(filin_pi:str,  allkers, allvars:str, time_range=None, method=None, time_chunk=12):
-    """
-    Computes the preindustrial (PI) climatology or running mean for a given variable or set of variables.
-    The function handles the loading and processing of kernels (either HUANG or ERA5) and calculates the PI climatology
-    or running mean depending on the specified parameters. The output can be used for anomaly calculations
-    or climate diagnostics.
-    Parameters:
-    -----------
-    filin_pi : str
-        Template path for the preindustrial data NetCDF files, with a placeholder for the variable name.
-        Example: `'/path/to/files/{}_data.nc'`.
-    cart_k : str
-        Path to the directory containing kernel dataset files.
-    allkers  : dict
-        Dictionary containing radiative kernels for different conditions (e.g., 'clr', 'cld').
-    allvars : str
-        The variable name(s) to process. For example, `'alb'` for albedo or specific flux variables
-        (e.g., `'rsus'`, `'rsds'`).
-    method : {"climatology", "running_m", "climatology_mean", "running_m_mean"}, default "climatology"
-        Method for anomaly computation:
-        - "climatology"            : computes the mean climatology over the entire time period
-        - "running_m"              : computes a running mean (e.g., 252-month moving average) over the selected time period.
-        - "climatology_mean"       : computes the mean climatology over the entire time period
-        - "running_m_mean"         : computes a running mean (e.g., 252-month moving average) over the selected time period.
-    time_chunk : int, optional (default=12)
-        Time chunk size for processing data with Xarray. Optimizes memory usage for large datasets.
-    Returns:
-    --------
-    piok : xarray.DataArray
-        The computed PI climatology or running mean of the specified variable(s), regridded to match the kernel's spatial grid.
-    Notes:
-    ------
-    - For albedo ('alb'), the function computes it as `rsus / rsds` using the provided PI files for surface upward
-      (`rsus`) and downward (`rsds`) shortwave radiation.
-    - If `use_climatology` is False, the function computes a running mean for the selected time period (e.g., years 2540-2689).
-    - Kernels are loaded or preprocessed from `cart_k` and stored in `cart_out`. Supported kernels are HUANG and ERA5.
-    """
-    if ('cld', 't') in allkers:
-        k = allkers[('cld', 't')]
-    else:
-        print(f"Key ('cld', 't') not found in allkers")
-        k = None  
-    pimean = dict()
-
-    import glob
-    alb_exists = False
-    if allvars == 'alb':
-        if isinstance(filin_pi, str):
-            alb_exists = bool(glob.glob(filin_pi.format('alb')))
-        elif isinstance(filin_pi, xr.Dataset):
-            alb_exists = 'alb' in filin_pi
-
-    if allvars == 'alb' and not alb_exists:
-        allvar = ['rsus', 'rsds']
-        
-        for vnam in allvar:
-            if isinstance(filin_pi, str):  # 1: path ai file
-                filist = glob.glob(filin_pi.format(vnam))
-                filist.sort()
-                var = xr.open_mfdataset(filist, chunks={'time': time_chunk}, use_cftime=True)
-            elif isinstance(filin_pi, xr.Dataset):  # 2: dataset già caricato
-                var = filin_pi[vnam]
-            else:
-                raise ValueError("filin_pi must to be a string path or an xarray.Dataset")
-
-            if time_range is not None:
-                var = var.sel(time=slice(time_range['start'], time_range['end']))
-
-            if method in ["climatology", "climatology_mean"]:
-                var_mean = var.groupby('time.month').mean()
-                var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
-                pimean[vnam] = var_mean
-            else:
-                pimean[vnam] = ctl.regrid_dataset(var, k.lat, k.lon)
-
-        piok = pimean['rsus'] / pimean['rsds']
-        if method in ["running_m", "running_m_mean"]:
-            piok = ctl.running_mean(piok, 252)
-        return piok
-
-    else:
-        if isinstance(filin_pi, str):  # 1: path ai file
-            filist = glob.glob(filin_pi.format(allvars))
-            filist.sort()
-            var = xr.open_mfdataset(filist, chunks={'time': time_chunk}, use_cftime=True)
-        elif isinstance(filin_pi, xr.Dataset):  # 2: dataset già caricato
-            var = filin_pi[allvars]
-        else:
-            raise ValueError("filin_pi must to be a string path or an xarray.Dataset")
-
-        if time_range is not None:
-            var = var.sel(time=slice(time_range['start'], time_range['end']))
-
-        #if time_range is not None:
-            #var = var.sel(time=slice(time_range[0], time_range[1]))
-
-        if method in ["climatology", "climatology_mean"]:
-            var_mean = var.groupby('time.month').mean()
-            var_mean = ctl.regrid_dataset(var_mean, k.lat, k.lon)
-            piok = var_mean
-        else:
-            piok = ctl.regrid_dataset(var, k.lat, k.lon)
-            piok = ctl.running_mean(piok, 252)
-
-    return piok
+#### 
 
 ##tropopause computation (Reichler 2003) 
-def mask_str(var):
+def mask_strato(ta):
     """
     Generates a mask for atmospheric temperature data based on the lapse rate threshold.
     as in (Reichler 2003) 
 
     Parameters:
     -----------
-    var: xarray.DataArray
+    ta: xarray.DataArray
     Atmospheric temperature dataset with pressure levels ('plev') as a coordinate. 
 
     Returns:
@@ -714,8 +1042,8 @@ def mask_str(var):
         - Values are 1 where the lapse rate (`laps`) is less than or equal to -2 K/km.
         - Values are NaN elsewhere.
     """
-    p=var.plev
-    n=var.sizes['plev']
+    p=ta.plev
+    n=ta.sizes['plev']
     #costanti
     g=9.81 #gravity
     cp=1005 #specific heat capacity of air at costant pressure
@@ -726,9 +1054,9 @@ def mask_str(var):
     plevs=[]
     for i in range (0, n-1):
         lev1_P=(p.isel(plev=i)).item()
-        lev1_T=var.sel(plev= lev1_P)
+        lev1_T=ta.sel(plev= lev1_P)
         lev2_P=(p.isel(plev=i+1)).item()
-        lev2_T=var.sel(plev= lev2_P)
+        lev2_T=ta.sel(plev= lev2_P)
         a=(lev2_T-lev1_T)
         b=((lev2_P*100)**k -(lev1_P*100)**k) #*100 bc datas are in hPa
         c=((lev1_P*100)**k+(lev2_P*100)**k)
@@ -743,6 +1071,14 @@ def mask_str(var):
     mask = cond.astype(int).cumprod("plev")
     mask = mask.where(mask == 1)
 
+    # re-adding the last level with all zeros
+    zero_slice = xr.zeros_like(ta.isel(plev=0)).assign_coords(plev=ta.plev[-1]).expand_dims('plev')
+    mask = xr.concat([mask, zero_slice], dim='plev').transpose(*ta.dims)
+    
+    if ta.chunks:
+        chunk_dic = {dim: chu for dim, chu in zip(ta.dims, ta.chunks)}
+        mask = mask.chunk(chunk_dic)
+        
     return mask
 
 ### Mask for surf pressure
@@ -850,6 +1186,8 @@ def mask_pres(surf_pressure, cart_out:str, allkers, config_file=None):
     wid_mask = xr.DataArray(wid_mask, dims = k.dims[1:], coords = k.drop('month').coords)
     return wid_mask
 
+###################################################
+
 def pliq(T):
     pliq = 0.01 * np.exp(54.842763 - 6763.22 / T - 4.21 * np.log(T) + 0.000367 * T + np.tanh(0.0415 * (T - 218.8)) * (53.878 - 1331.22 / T - 9.44523 * np.log(T) + 0.014025 * T))
     return pliq
@@ -858,9 +1196,9 @@ def pice(T):
     pice = np.exp(9.550426 - 5723.265 / T + 3.53068 * np.log(T) - 0.00728332 * T) / 100.0
     return pice
 
-def dlnws(T):
+def dlnws_old(T):
     """
-    Calculates 1/(dlnq/dT_1K).
+    Calculates 1/(dlnq/dT_1K) using Huang et al. (2017) formulas.
     """
     pliq0 = pliq(T)
     pice0 = pice(T)
@@ -871,9 +1209,11 @@ def dlnws(T):
     
     # Use np.where to choose between pliq and pice based on the condition T >= 273
     if isinstance(T, xr.DataArray):# and isinstance(T.data, da.core.Array):
+        print('qui')
         ws = xr.where(T >= 273, pliq0, pice0)    # Dask equivalent of np.where is da.where
         ws1 = xr.where(T1 >= 273, pliq1, pice1)
     else:
+        print('qua')
         ws = np.where(T >= 273, pliq0, pice0)
         ws1 = np.where(T1 >= 273, pliq1, pice1)
     
@@ -884,6 +1224,88 @@ def dlnws(T):
         dws = ctl.transform_to_dataarray(T, dws, 'dlnws')
    
     return dws
+
+
+def q2(e, p = 1e3):
+    """
+    Saturation specific humidity, given saturation vapor pressure and P (in hPa).
+    """
+    return 0.622*e/(p - 0.378*e)
+
+
+def calc_qsat(temp, pres = 1.e3):
+    """
+    Computes the saturation specific humidity.
+    temp in K
+    pres in hPa
+    """
+
+    # Following Murphy and Koop 2005
+    # ew = 0.01*np.exp(54.842763 - 6763.22/T - 4.210*np.log(T) + 0.000367*T + np.tanh(0.0415*(T - 218.8)) * (53.878 - 1331.22/T - 9.44523*np.log(T) + 0.014025*T))
+    # ei = 0.01*np.exp(9.550426 - 5723.265/T + 3.53068*np.log(T) - 0.00728332*T)
+
+    # simplified formulas (WMO)
+    t = temp - 273.15
+    ew = 6.112 * np.exp(17.62 * t / (243.12 + t))
+    ei = 6.112 * np.exp(22.46 * t / (272.62 + t))
+
+    # use ice vs water
+    if isinstance(temp, xr.DataArray):
+        e = xr.where(t > 0, ew, ei)
+    else:
+        e = np.where(t > 0, ew, ei)
+
+    qsat = q2(e, pres)
+
+    return qsat
+
+
+def Kq_fact(temp, method, pres = None):
+    """
+    Factor used to normalize the water vapor kernel, which usually corresponds to a change in specific humidity due to an increase of atm temp by 1 K, keeping RH constant.
+    """
+    if pres is None:
+        if isinstance(temp, xr.DataArray):
+            pres = temp.plev
+        else:
+            raise ValueError('pres not specified in input to Kq_fact')
+    
+    Rv = 461.5 # gas constant of water vapor
+    Lv = 2.5e+06 # latent heat of water vapor
+
+    qs0 = calc_qsat(temp, pres = pres)
+    qs1K = calc_qsat(temp + 1, pres = pres)
+
+    if method == 'log': # Huang, 2017 (HUANG)
+        cos = 1/np.log(qs1K/qs0)
+    elif method == 'linear': # Huang and Huang, 2023 (ERA5)
+        cos = qs0/(qs1K - qs0)
+    elif method == 'CC': # approximation using CC, as in Huang and Huang, eq. A6
+        cos = temp**2 * Rv / Lv
+    else:
+        raise ValueError(f'method {method} not recognized')
+
+    return cos
+
+
+# function dlnws(T)
+# begin
+
+# pliq=0.01*exp(54.842763- 6763.22/T-4.21*log(T) + 0.000367*T+tanh(0.0415*(T-218.8))*\
+#                 (53.878 -1331.22/T-9.44523*log(T) + 0.014025*T))
+# pice=exp(9.550426-5723.265/T+3.53068*log(T)-0.00728332*T)/100.
+# T1=T+1.
+# pliq1=0.01*exp(54.842763- 6763.22 / T1-4.21*log(T1) + 0.000367*T1+tanh(0.0415*(T1 - 218.8))*\
+#                 (53.878 -1331.22/T1-9.44523*log(T1) + 0.014025*T1))
+# pice1=exp(9.550426-5723.265/T1+3.53068*log(T1)-0.00728332*T1)/100.
+
+# ws=where(T.ge.273,pliq,pice)
+# ws1=where(T1.ge.273,pliq1,pice1)
+
+# dws=ws/(ws1-ws)
+# return(dws)
+# end
+
 
 ############# SPATIAL PATTERN FUNCTION #############
 def regress_pattern_vectorized(feedback_data, gtas):
@@ -946,73 +1368,6 @@ def regress_pattern_vectorized(feedback_data, gtas):
 
     return slope, stderr
 
-############ ANOMALY PREPROCESSING FUNCTION #############
-def compute_anomalies(var, clim, method="climatology", nonlinear=False, check=False):
-    """
-    Compute anomalies between a variable and its climatology/reference.
-
-    Parameters
-    ----------
-    var : xr.DataArray
-        Variable to anomaly-ize (e.g., ts, hus, etc.)
-    clim : xr.DataArray
-        Reference climatology or mean (monthly or time mean).
-    method : str, default "monthly"
-        Method for anomaly computation:
-        - "climatology"            : monthly averaged climatology to calculate the anomaly
-        - "running_m"              : 21-years running mean climatology to calculate the anomaly 
-        - "climatology_mean"       : anomaly is computed as a single averaged value over the time dimension
-        - "running_m_mean"         : anomaly is computed as a single averaged value over the time dimension
-    nonlinear : bool, default False
-        If True, apply log-difference instead of linear subtraction.
-    check : bool, default False
-        If True, perform check_data(var, clim) before computing anomalies.
-
-    Returns
-    -------
-    xr.DataArray
-        Anomalies
-    """
-    # choose linear or nonlinear subtraction
-    if nonlinear:
-        func = lambda x, c: np.log(x) - np.log(c)
-    else:
-        func = lambda x, c: x - c
-
-    if hasattr(var, "chunks") or hasattr(clim, "chunks"):
-        var, clim = unify_chunks(var, clim)
-
-    if method == "climatology":
-        # group anomalies by month (climatology already grouped by month)
-        return xr.apply_ufunc(func, var.groupby("time.month"), clim, dask="allowed")
-
-    elif method == "running_m":
-        if check:
-            check_data(var, clim)
-        # broadcast climatology to full time axis
-        clim_aligned = clim.drop("time")
-        clim_aligned["time"] = var["time"]
-        return xr.apply_ufunc(func, var, clim_aligned, dask="allowed")
-
-    elif method == "climatology_mean":
-        # anomalies of mean seasonal cycle vs climatology
-        return xr.apply_ufunc(func, var.groupby("time.month").mean(), clim, dask="allowed")
-
-    elif method == "running_m_mean":
-        if check: 
-            check_data(var, clim)
-         # broadcast climatology to full time axis
-        clim_aligned = clim.drop_vars("time", errors="ignore")
-        clim_aligned["time"] = var["time"]
-        return xr.apply_ufunc(
-            func,
-            var.groupby("time.month").mean(),
-            clim_aligned.groupby("time.month").mean(),
-            dask="allowed"
-        )
-
-    else:
-        raise ValueError(f"Unknown anomaly method {method}")
        
 # FUNCTION FOR WV ANOMALIES
 # From Mass mixing Ratio (kg/kg to ppmv)
@@ -1024,75 +1379,8 @@ def q_to_ppmv(q_inp):
 
 ############ RADIATIVE ANOMALY FUNCTIONS #############
 #PLANCK SURFACE
-def Rad_anomaly_planck_surf_wrapper(config_file: str, ker, variable_mapping_file: str):
-    """
-    Wrapper for Rad_anomaly_planck_surf function, which upload automatically the dataset,
-    kernels and climatology are necessary to calculate the radiative Planck-Surface anomaly.
 
-    Parameters:
-    -----------
-    config_file : str
-        configuration file YAML.
-    ker : str
-        kernels to upload ('ERA5' o 'HUANG').
-    variable_mapping_file : str
-        Path to the YAML file with variable standardization rules.
-
-    Returns:
-    --------
-    rad_anomaly : dict
-        radiative anomalies dictionary for clear sky ('clr') and all ('cld').
-    """
-
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'ts'
-    print("Read parameters from configuration file...")
-    if allvars not in ds.variables:
-        raise ValueError("The ts variable is not in the dataset")
-    
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    save_pattern = config.get("save_pattern", False)
-    save_pattern = bool(save_pattern)
-
-    # Read time ranges from config
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-    print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
-
-    print("Planck-Surface radiative anomaly computing...")
-    radiation = Rad_anomaly_planck_surf(ds, ref_clim_data, ker, allkers, cart_out, time_range_exp, method, save_pattern)
-
-    return (radiation)
-
-def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, time_range=None, method=None, save_pattern=False):
+def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
     """
     Compute the Planck surface radiation anomaly using climate model data and radiative kernels.
 
@@ -1137,145 +1425,36 @@ def Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, time_range=None, m
     (full spatial anomaly field for each sky condition)
     """
     radiation = dict()
-    k = allkers[('cld', 't')]
-
-    # define suffix for saved files based on method only
-    suffix = f"_{method}"
-
-    # select and regrid variable
-    if time_range is not None:
-        var = ds['ts'].sel(time=slice(time_range['start'], time_range['end']))
-    else:
-        var = ds['ts']
-    var = ctl.regrid_dataset(var, k.lat, k.lon)
-  
-    # Anomaly computation (always linear here)
-    anoms = compute_anomalies(var, piok['ts'], method=method, nonlinear=False, check=True)
- 
     for tip in ['clr', 'cld']:
         print(f"Processing {tip}")  
         try:
-            kernel = allkers[(tip, 'ts')]
-            print("Kernel loaded successfully")  
+            k = kernel.kernel[(tip, 'ts')]
+            # print("Kernel loaded successfully")  
         except Exception as e:
             print(f"Error loading kernel for {tip}: {e}")  
             continue  
 
-        # Apply kernel first
-        if method in ["climatology_mean", "running_m_mean"]:
-            #anomalies already averaged over months → just mean over month dimension
-            dRt = (anoms * kernel).mean("month")
-        elif method in ["climatology", "running_m"]:
-            # monthly or direct → compute yearly mean after grouping anomalies by month
-            dRt = (anoms.groupby("time.month") * kernel).groupby("time.year").mean("time")
+        dRt = (experiment.ds_anom['ts'].groupby("time.month") * k).groupby("time.year").mean("time")
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
             dRt.name = "dRt"
             dRt.attrs["description"] = f"{tip} surface Planck dRt pattern"
-            dRt.to_netcdf(cart_out + "dRt_planck-surf_pattern_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+            dRt.to_netcdf(cart_out + "dRt_planck-surf_pattern_" + tip +".nc", format="NETCDF4")
 
         #Then compute and save global mean
         dRt_glob = ctl.global_mean(dRt)
         planck = dRt_glob.compute()
+        planck.name='planck-surf'
         radiation[(tip, 'planck-surf')] = planck
-        planck.to_netcdf(cart_out + "dRt_planck-surf_global_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+        planck.to_netcdf(cart_out + "dRt_planck-surf_global_" + tip + ".nc", format="NETCDF4")
         planck.close()
         
-    return(radiation)
+    return radiation
 
 #PLANK-ATMO AND LAPSE RATE WITH VARYING TROPOPAUSE
-def Rad_anomaly_planck_atm_lr_wrapper(config_file: str, ker, variable_mapping_file: str):
-    """
-    Wrapper for Rad_anomaly_planck_atm_lr function, which upload automatically the dataset,
-    kernels and climatology are necessary to calculate the radiative Planck-Atmosphere-LpseRate anomaly.
 
-    Parameters:
-    -----------
-    config_file : str
-        configuration file YAML.
-    ker : str
-        kernels to upload ('ERA5' o 'HUANG').
-    variable_mapping_file : str
-        Path to the YAML file with variable standardization rules.
-
-
-    Returns:
-    --------
-    rad_anomaly : dict
-        radiative anomalies dictionary for clear sky ('clr') and all ('cld').
-    """
-
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'ts ta'.split()
-    print("Read parameters from configuration file...")
-
-    for var in allvars:
-        if var not in ds.variables:
-            raise ValueError(f"The variable '{var}' is not in the dataset")
-    
-    dataset_type = config.get('dataset_type', None)
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    use_atm_mask = config.get("use_atm_mask", True)
-    save_pattern = config.get("save_pattern", False)
-    use_atm_mask = bool(use_atm_mask)
-    save_pattern = bool(save_pattern)
-
-    # Read time ranges from config
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-    # Surface pressure management
-    surf_pressure = None
-    if ker == 'HUANG':  # HUANG requires surface pressure
-        pressure_path = config['file_paths'].get('pressure_data', None)
-        
-        if pressure_path:  # If pressure data is specified, load it
-            print("Loading surface pressure data...")
-            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
-            if not ps_files:
-                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
-            
-            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
-        else:
-            print("Using surface pressure passed as an array.")
-
-    print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config, allvars, ker, variable_mapping_file, allkers=allkers) 
-
-    print("Planck-Atmosphere-LapseRate radiative anomaly computing...")
-    radiation = Rad_anomaly_planck_atm_lr(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, config, method, use_atm_mask, save_pattern)
-    
-    return (radiation)
-
-def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=None, time_range=None, config_file=None, method=None, use_atm_mask=True, save_pattern=False):
+def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True, save_pattern=False):
 
     """
     Computes atmospheric Planck and lapse-rate radiation anomalies using climate model data and radiative kernels.
@@ -1328,190 +1507,62 @@ def Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure=No
     - dRt_planck-atmo_pattern_{tip}_{method}-{ker}kernels.nc
     - dRt_lapse-rate_pattern_{tip}_{method}-{ker}kernels.nc
     """
-    if ker == 'HUANG' and surf_pressure is None:
-        raise ValueError("Error: The 'surf_pressure' parameter cannot be None when 'ker' is 'HUANG'.")
-
     radiation=dict()
-    k= allkers[('cld', 't')]
-
-    vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
-    if ker=='HUANG':
-        wid_mask=mask_pres(surf_pressure, cart_out, allkers, config_file) 
-
-   
-    # define suffix for saved files based on method only
-    suffix = f"_{method}"
-
-    if time_range is not None:
-        var = ds['ta'].sel(time=slice(time_range['start'], time_range['end'])) 
-        var_ts = ds['ts'].sel(time=slice(time_range['start'], time_range['end'])) 
-        var=ctl.regrid_dataset(var, k.lat, k.lon)
-        var_ts=ctl.regrid_dataset(var_ts, k.lat, k.lon)
+    if use_strat_mask==True:
+        mask = mask_strato(experiment.ds['ta'])
+        ta_anom = (experiment.ds_anom['ta'] * mask).sel(plev = mask.plev)
     else:
-        var=ds['ta']
-        var_ts=ds['ts']
-        var = ctl.regrid_dataset(var, k.lat, k.lon)
-        var_ts = ctl.regrid_dataset(var_ts, k.lat, k.lon)
-
-    print('check experiment vertical dimention')
-    var=check_vertical(var)
-    print('check climatology vertical dimention')
-    piok['ta']=check_vertical(piok['ta'])
-
-    # Anomaly computation (always linear here)
-    ta_anom = compute_anomalies(var, piok["ta"], method=method, nonlinear=False, check=True)
-    ts_anom = compute_anomalies(var_ts, piok["ts"], method=method, nonlinear=False, check=True)
-
-    if use_atm_mask==True:
-        mask = mask_str(var)
-        if method in ["climatology", "running_m"]:
-            ta_anom = (ta_anom * mask).interp(plev=vlevs.plev)
-        else:
-            ta_anom = (ta_anom * mask.groupby('time.month')).interp(plev=vlevs.plev) #mask in 'time', after * all in time
-    else:
-        ta_anom = ta_anom.interp(plev=vlevs.plev)
+        ta_anom = experiment.ds_anom['ta']
     
-    if method in ["climatology_mean", "running_m_mean"] and use_atm_mask:
-        anoms_lr = ta_anom.groupby('time.month') - ts_anom
-    else:
-        anoms_lr = ta_anom - ts_anom
+    anoms_lr = ta_anom - experiment.ds_anom['ts'] 
     anoms_unif = ta_anom - anoms_lr
 
     for tip in ['clr', 'cld']:
         print(f"Processing {tip}")  
         try:
-            kernel = allkers[(tip, 't')]
-            print("Kernel loaded successfully")  
+            k = kernel.kernel[(tip, 't')]
+            # print("Kernel loaded successfully")  
         except Exception as e:
             print(f"Error loading kernel for {tip}: {e}")  
             continue  
 
-        # Apply kernel first
-        if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
-            #anomalies already averaged over months → just mean over month dimension
-            if ker == "HUANG":
-                dRt_unif = (anoms_unif * kernel * wid_mask/100).sum("plev")
-                dRt_lr = (anoms_lr * kernel * wid_mask/100).sum("plev")
-            if ker == "ERA5":
-                dRt_unif = (anoms_unif * (kernel * vlevs.dp/100)).sum("plev")
-                dRt_lr = (anoms_lr * (kernel * vlevs.dp/100)).sum("plev")
-            if ker == 'SPECTRAL':
-                dRt_unif = (anoms_unif*kernel).sum(dim="plev")
-                dRt_lr = (anoms_lr*kernel).sum(dim="plev")
+        if kernel.name=='SPECTRAL':
+            dRt_unif = (anoms_unif.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
+            dRt_lr = (anoms_lr.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
         else:
-            if ker == "HUANG":
-                dRt_unif = (anoms_unif.groupby('time.month') * kernel * wid_mask/100).sum("plev")
-                dRt_lr = (anoms_lr.groupby('time.month') * kernel * wid_mask /100).sum("plev")
-            if ker == "ERA5":
-                dRt_unif = (anoms_unif.groupby('time.month') * (kernel * vlevs.dp/100)).sum("plev")
-                dRt_lr = (anoms_lr.groupby('time.month') * (kernel * vlevs.dp/100)).sum("plev")
-            if ker=='SPECTRAL':
-                dRt_unif = (anoms_unif.groupby('time.month')*kernel).sum(dim="plev")
-                dRt_lr = (anoms_lr.groupby('time.month')*kernel).sum(dim="plev")
+            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
+            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
 
-        # Average according to method
-        if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
-            dRt_unif = dRt_unif.mean("month")
-            dRt_lr = dRt_lr.mean("month")
-        else:
-            dRt_unif = dRt_unif.groupby("time.year").mean("time")
-            dRt_lr = dRt_lr.groupby("time.year").mean("time") 
 
-        
         #Save full dRt pattern before global averaging
         if save_pattern:
             dRt_unif.name = "dRt_atmo"
             dRt_unif.attrs["description"] = f"{tip} atmosperic Planck dRt pattern"
-            dRt_unif.to_netcdf(cart_out + "dRt_planck-atmo_pattern_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+            dRt_unif.to_netcdf(cart_out + "dRt_planck-atmo_pattern_" + tip + ".nc", format="NETCDF4")
 
             dRt_lr.name = "dRt_lr"
             dRt_lr.attrs["description"] = f"{tip} lapse-rate dRt pattern"
-            dRt_lr.to_netcdf(cart_out + "dRt_lapse-rate_pattern_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+            dRt_lr.to_netcdf(cart_out + "dRt_lapse-rate_pattern_" + tip + ".nc", format="NETCDF4")
 
         #Then compute and save global mean
         dRt_unif_glob = ctl.global_mean(dRt_unif)
         dRt_lr_glob = ctl.global_mean(dRt_lr)
         feedbacks_atmo = dRt_unif_glob.compute()
         feedbacks_lr = dRt_lr_glob.compute()
+        feedbacks_atmo.name='planck-atmo'
+        feedbacks_lr.name='lapse-rate'
         radiation[(tip,'planck-atmo')]=feedbacks_atmo
         radiation[(tip,'lapse-rate')]=feedbacks_lr 
-        feedbacks_atmo.to_netcdf(cart_out+ "dRt_planck-atmo_global_" +tip + suffix +"-"+ker+"kernels.nc", format="NETCDF4")
-        feedbacks_lr.to_netcdf(cart_out+ "dRt_lapse-rate_global_" +tip  + suffix +"-"+ker+"kernels.nc", format="NETCDF4")
+        feedbacks_atmo.to_netcdf(cart_out+ "dRt_planck-atmo_global_" +tip + ".nc", format="NETCDF4")
+        feedbacks_lr.to_netcdf(cart_out+ "dRt_lapse-rate_global_" +tip  + ".nc", format="NETCDF4")
         feedbacks_atmo.close()
         feedbacks_lr.close()
 
     return(radiation)
 
 #ALBEDO
-def Rad_anomaly_albedo_wrapper(config_file: str, ker, variable_mapping_file: str):
-    """
-    Wrapper for Rad_anomaly_albedo function, which upload automatically the dataset,
-    kernels and climatology are necessary to calculate the radiative Albedo anomaly.
 
-    Parameters:
-    -----------
-    config_file : str
-        configuration file YAML.
-    ker : str
-        kernels to upload ('ERA5' o 'HUANG').
-    variable_mapping_file : str
-        Path to the YAML file with variable standardization rules.
-
-    Returns:
-    --------
-    rad_anomaly : dict
-        radiative anomalies dictionary for clear sky ('clr') and all ('cld').
-    """
-
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'alb'
-    print("Read parameters from configuration file...")
-    
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    save_pattern = config.get("save_pattern", False)
-    save_pattern = bool(save_pattern)
-
-    # Read time ranges from config
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-    print(f"Time range used for the simulation analysis: {time_range_exp}")
-
-    print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config, allvars, ker, variable_mapping_file, allkers=allkers) 
-
-    print("Albedo radiative anomaly computing...")
-    radiation = Rad_anomaly_albedo(ds, ref_clim_data, ker, allkers, cart_out, time_range_exp, method, save_pattern)
-
-    return (radiation)
-
-def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, time_range=None, method=None, save_pattern=False):
+def Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern=False):
     """
     Compute the albedo radiation anomaly using climate model output and radiative kernels.
 
@@ -1558,156 +1609,32 @@ def Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, time_range=None, method
     
     radiation=dict()
 
-    if ker == "SPECTRAL":
+    if kernel.name == "SPECTRAL":
         print("Skipping albedo feedback for SPECTRAL kernels (not defined).")
         return radiation
 
-    k=allkers[('cld', 't')]
-
-    # define suffix for saved files based on method only
-    suffix = f"_{method}"
-
-    if 'alb' in ds:
-        print("Variable 'alb' found in dataset. Using it directly...")
-        var = ds['alb']
-    elif 'rsus' in ds and 'rsds' in ds:
-        print("Variable 'alb' not found. Calculating from rsus/rsds...")
-        var = ds['rsus'] / ds['rsds']
-    else:
-        raise KeyError(f"Neither 'alb' nor 'rsus'/'rsds' variables found in the dataset. Please check your dataset and variable mapping. "
-                       f"Available variables: {list(ds.data_vars)}")
-
-    var = var.fillna(0)
-    var = var.where(var < 10, 0)
-
-    if time_range is not None:
-        var = var.sel(time=slice(time_range['start'], time_range['end']))
-    var = ctl.regrid_dataset(var, k.lat, k.lon)
-
-    # Removing inf and nan from alb
-    piok_var = piok['alb'] if 'alb' in piok else piok
-    piok_var = piok_var.where(piok_var > 0., 0.)
-    var = var.where(var > 0., 0.)
-
-    # Anomaly computation (always linear here)
-    anoms = compute_anomalies(var, piok_var, method=method, nonlinear=False, check=True)
-
     for tip in [ 'clr','cld']:
-        kernel = allkers[(tip, 'alb')]
-        # Apply kernel first
-        if method in ["climatology_mean", "running_m_mean"]:
-            #anomalies already averaged over months → just mean over month dimension
-            dRt = (anoms * kernel).mean("month")
-        elif method in ["climatology", "running_m"]:
-            # monthly or direct → compute yearly mean after grouping anomalies by month
-            dRt = (anoms.groupby("time.month") * kernel).groupby("time.year").mean("time")
+        k = kernel.kernel[(tip, 'alb')]
+        dRt = (experiment.ds_anom['alb'].groupby("time.month") * k).groupby("time.year").mean("time")
             
         #Save full dRt pattern before global averaging
         if save_pattern:
             dRt.name = "dRt"
             dRt.attrs["description"] = f"{tip} albedo dRt pattern"
-            dRt.to_netcdf(cart_out + "dRt_albedo_pattern_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+            dRt.to_netcdf(cart_out + "dRt_albedo_pattern_" + tip + ".nc", format="NETCDF4")
 
         #Then compute and save global mean
         dRt_glob = ctl.global_mean(dRt).compute()
         alb = 100*dRt_glob
+        alb.name='albedo'
         radiation[(tip, 'albedo')]= alb
-        alb.to_netcdf(cart_out+ "dRt_albedo_global_" +tip + suffix +"-"+ker+"kernels.nc", format="NETCDF4")
+        alb.to_netcdf(cart_out+ "dRt_albedo_global_" +tip + ".nc", format="NETCDF4")
         alb.close()
 
     return(radiation)
 
 #W-V COMPUTATION
-def Rad_anomaly_wv_wrapper(config_file: str, ker, variable_mapping_file: str):
-    """
-    Wrapper for Rad_anomaly_wv function, which upload automatically the dataset,
-    kernels and climatology are necessary to calculate the radiative Water-Vapour anomaly.
-
-    Parameters:
-    -----------
-    config_file : str
-        configuration file YAML.
-    ker : str
-        kernels to upload ('ERA5' o 'HUANG').
-    variable_mapping_file : str
-        Path to the YAML file with standardization rules for variables.
-
-    Returns:
-    --------
-    rad_anomaly : dict
-        radiative anomalies dictionary for clear sky ('clr') and all ('cld').
-    """
-
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'hus ta'.split()
-    print("Read parameters from configuration file...")
-
-    for var in allvars:
-        if var not in ds.variables:
-            raise ValueError(f"The variable '{var}' is not in the dataset")
-
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-    
-    dataset_type = config.get('dataset_type', None)
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    use_atm_mask = config.get("use_atm_mask",True)
-    save_pattern = config.get("save_pattern", False)    
-    use_atm_mask = bool(use_atm_mask)
-    save_pattern = bool(save_pattern)
-
-    # Read time ranges from config
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-    # Surface pressure management
-    surf_pressure = None
-    if ker == 'HUANG':  # HUANG requires surface pressure
-        pressure_path = config['file_paths'].get('pressure_data', None)
-        
-        if pressure_path:  # If pressure data is specified, load it
-            print("Loading surface pressure data...")
-            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
-            if not ps_files:
-                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
-            
-            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
-        else:
-            print("Using surface pressure passed as an array.")
-
-    print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config, allvars, ker, variable_mapping_file, allkers=allkers) 
-
-    print("Water-Vapour radiative anomaly computing...")
-    radiation = Rad_anomaly_wv(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, config, method, use_atm_mask, save_pattern)
-
-    return (radiation)
-
-def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, config_file=None, method=None, use_atm_mask=True, save_pattern=False):
+def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False):
     
     """
     Compute water vapor radiation anomalies using climate model output and radiative kernels.
@@ -1759,662 +1686,205 @@ def Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=N
     - dRt_water-vapor_pattern_{tip}_{method}-{ker}kernels.nc
       (full spatial anomaly field for each sky condition)
     """
-    if ker == 'HUANG' and surf_pressure is None:
-        raise ValueError("Error: The 'surf_pressure' parameter cannot be None when 'ker' is 'HUANG'.")
-
-    k=allkers[('cld', 't')]
     radiation=dict()
     
-    vlevs=pickle.load(open(cart_out + 'vlevs_'+ker+'.p', 'rb'))
-    
-    # define suffix for saved files based on method only
-    suffix = f"_{method}"
-
-    if time_range is not None:
-        var = ds['hus'].sel(time=slice(time_range['start'], time_range['end'])) 
-        var_ta = ds['ta'].sel(time=slice(time_range['start'], time_range['end']))
+    if kernel.use_log_wv:
+        wv_name='hus_log'
     else:
-        var=ds['hus']
-        var_ta=ds['ta']
-    print('check experiment vertical dimention')
-    var=check_vertical(var)
-    var_ta=check_vertical(var_ta)
-
-    var = ctl.regrid_dataset(var, k.lat, k.lon)
-    var_ta = ctl.regrid_dataset(var_ta, k.lat, k.lon)
-    if use_atm_mask==True:
-        mask=mask_str(var_ta)
-
-    Rv = 461.5 # gas constant of water vapor
-    Lv = 2.25e+06 # latent heat of water vapor
-
-    if method in ["running_m", "running_m_mean"]:
-        # Time alignment needed
-        check_data(var_ta, piok["ta"])
-        piok_ta = piok["ta"].drop("time")
-        piok_ta["time"] = var["time"]
-
-        piok_hus = piok["hus"].drop("time")
-        piok_hus["time"] = var["time"]
-    else:
-        piok_ta = piok["ta"]
-        piok_hus = piok["hus"]
-    print('check climatology vertical dimention')
-    piok_hus=check_vertical(piok_hus)
-    piok_ta=check_vertical(piok_ta)
-
-    ta_abs_pi = piok_ta.interp(plev = vlevs.plev)
-    piok_int = piok_hus.interp(plev = vlevs.plev)
-
-    if ker == "HUANG":
-        wid_mask = mask_pres(surf_pressure, cart_out, allkers, config_file)
-        # nonlinear anomalies (log)
-        anoms_ok3 = compute_anomalies( var, piok_hus, method=method, nonlinear=True, check=True)       
-        if use_atm_mask==True:
-            if method in ["climatology", "running_m"]:
-                anoms_ok3=(anoms_ok3*mask).interp(plev = vlevs.plev)
-            else:
-                anoms_ok3 = (anoms_ok3 * mask.groupby('time.month')).interp(plev=vlevs.plev) #mask in 'time', after * all in time
-        else:
-            anoms_ok3=anoms_ok3.interp(plev = vlevs.plev)
-        if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
-            coso3 = anoms_ok3 * dlnws(ta_abs_pi)
-        else:
-            coso3 = anoms_ok3.groupby('time.month') * dlnws(ta_abs_pi)
-            
-
-    if ker == "ERA5":
-        # linear anomalies (x - clim)
-        anoms = compute_anomalies(var, piok_hus, method=method, nonlinear=False, check=True)
-        if use_atm_mask==True:
-            if method in ["climatology", "running_m"]:
-                anoms=(anoms*mask).interp(plev = vlevs.plev)
-            else:
-               anoms=(anoms*mask.groupby('time.month')).interp(plev = vlevs.plev) 
-        else:
-            anoms=anoms.interp(plev = vlevs.plev)
-        if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:    
-            coso = (anoms / piok_int) * (ta_abs_pi**2) * Rv / Lv
-        else:
-            coso = (anoms.groupby('time.month') / piok_int).groupby('time.month') * (ta_abs_pi**2) * Rv / Lv
-
-
-    if ker == "SPECTRAL":
-        var_wv = q_to_ppmv(var)
-        piok_wv =q_to_ppmv(piok_hus)
-        anoms = compute_anomalies(var_wv, piok_wv, method=method, nonlinear=False, check=True)
-        if use_atm_mask==True:
-            if method in ["climatology", "running_m"]:
-                anoms=(anoms*mask).interp(plev = vlevs.plev)
-            else:
-               anoms=(anoms*mask.groupby('time.month')).interp(plev = vlevs.plev) 
-        else:
-            anoms=anoms.interp(plev = vlevs.plev)
-
-    for tip in ['clr','cld']: 
-        if ker != 'SPECTRAL':
-            kernel_lw = allkers[(tip, 'wv_lw')]
-            kernel_sw = allkers[(tip, 'wv_sw')]
-            kernel = kernel_lw + kernel_sw
-        else:
-            kernel_lw = allkers[(tip, 'wv_lw')]
-            kernel= kernel_lw
+        wv_name='hus'
         
-        if ker=='HUANG':
-            if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
-                dRt = (coso3* kernel* wid_mask/100).sum('plev').mean('month')
-                dRt_lw = (coso3* kernel_lw* wid_mask/100).sum('plev').mean('month')
-                dRt_sw = (coso3* kernel_sw* wid_mask/100).sum('plev').mean('month')
-            else:
-                dRt = (coso3.groupby('time.month')* kernel* wid_mask/100).sum('plev').groupby('time.year').mean('time')
-                dRt_lw = (coso3.groupby('time.month')* kernel_lw* wid_mask/100).sum('plev').groupby('time.year').mean('time')
-                dRt_sw = (coso3.groupby('time.month')* kernel_sw* wid_mask/100).sum('plev').groupby('time.year').mean('time')
+    if use_strat_mask==True:
+        mask=mask_strato(experiment.ds['ta'])
+        anoms_hus= (experiment.ds_anom[wv_name] * mask).sel(plev = mask.plev)
+    else:
+        anoms_hus=experiment.ds_anom[wv_name]
+            
+    if kernel.name=='HUANG':
+        dln = Kq_fact(control.ds_clim['ta'], method = 'CC')
+        if 'time' in dln.dims:
+            coso = anoms_hus * dln.values
+        elif 'month' in dln.dims:
+            coso = anoms_hus.groupby('time.month') * dln
+    elif kernel.name=='ERA5':
+        dq_norm = (anoms_hus.groupby('time.month') / control.ds_clim['hus'])
+        print(dq_norm.shape)
+        coso = dq_norm.groupby('time.month') * Kq_fact(control.ds_clim['ta'], method = 'CC')
+        # coso = (anoms_hus.groupby('time.month') / control.ds_clim['hus']) * Kq_fact(control.ds_clim['ta'], method = 'linear')
+    elif kernel.name == "SPECTRAL":
+        coso = q_to_ppmv(anoms_hus)
+    
 
+    for tip in ['clr','cld']:
+        print(f"Processing {tip}") 
+        kernel_lw = kernel.kernel[(tip, 'wv_lw')]
+        if kernel.name!= 'SPECTRAL':
+            kernel_sw = kernel.kernel[(tip, 'wv_sw')]
 
-        if ker=='ERA5':
-            if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
-                dRt = (coso*( kernel* vlevs.dp/100)).sum('plev').mean('month')
-                dRt_lw = (coso*( kernel_lw* vlevs.dp/100)).sum('plev').mean('month')
-                dRt_sw = (coso*( kernel_sw* vlevs.dp/100)).sum('plev').mean('month')
-            else:
-                dRt = (coso.groupby('time.month')*( kernel* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
-                dRt_lw = (coso.groupby('time.month')*( kernel_lw* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
-                dRt_sw = (coso.groupby('time.month')*( kernel_sw* vlevs.dp/100) ).sum('plev').groupby('time.year').mean('time')
-
-
-        if ker=='SPECTRAL':
-            if method in ["climatology_mean", "running_m_mean"] and use_atm_mask==False:
-                dRt = (anoms*kernel).sum(dim="plev").mean('month')
-            else:
-                dRt= (anoms.groupby('time.month')*kernel).sum(dim="plev").groupby('time.year').mean('time')
+        if kernel.name=='SPECTRAL':
+            dRt_lw = (coso.groupby('time.month')* kernel_lw).sum('plev').groupby('time.year').mean('time')
+        else:
+            dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
+            dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
+            dRt = dRt_lw + dRt_sw
+                
                 
                 
         #Save full dRt pattern before global averaging
         if save_pattern:
             dRt.name = "dRt"
             dRt.attrs["description"] = f"{tip} water vapor dRt pattern"
-            dRt.to_netcdf(cart_out + "dRt_water-vapor_pattern_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
-            if ker != 'SPECTRAL':
+            dRt.to_netcdf(cart_out + "dRt_water-vapor_pattern_" + tip + ".nc", format="NETCDF4")
+            if kernel.name != 'SPECTRAL':
                 dRt_lw.name = "dRt_lw"
                 dRt_lw.attrs["description"] = f"{tip} water vapor dRt_lw pattern"
-                dRt_lw.to_netcdf(cart_out + "dRt_lw_water-vapor_pattern_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+                dRt_lw.to_netcdf(cart_out + "dRt_lw_water-vapor_pattern_" + tip +  ".nc", format="NETCDF4")
                 dRt_sw.name = "dRt_sw"
                 dRt_sw.attrs["description"] = f"{tip} water vapor dRt_sw pattern"
-                dRt_sw.to_netcdf(cart_out + "dRt_sw_water-vapor_pattern_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+                dRt_sw.to_netcdf(cart_out + "dRt_sw_water-vapor_pattern_" + tip +  ".nc", format="NETCDF4")
 
-        if ker != 'SPECTRAL':
-            dRt_glob_lw = ctl.global_mean(dRt_lw)
-            wv_lw= dRt_glob_lw.compute()
-            wv_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+ suffix  +"-"+ker+"kernels.nc", format="NETCDF4")
+        
+        dRt_glob_lw = ctl.global_mean(dRt_lw)
+        wv_lw= dRt_glob_lw.compute()
+        wv_lw.name='water-vapor_lw'
+        wv_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
+        radiation[(tip, 'water-vapor_lw')] = wv_lw
+        if kernel.name != 'SPECTRAL':
             dRt_glob_sw = ctl.global_mean(dRt_sw)
             wv_sw= dRt_glob_sw.compute()
-            wv_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+ suffix +"-"+ker+"kernels.nc", format="NETCDF4")
-            
-        #Then compute and save global mean
-        dRt_glob = ctl.global_mean(dRt)
-        wv= dRt_glob.compute()
-        radiation[(tip, 'water-vapor')] = wv
-        wv.to_netcdf(cart_out+ "dRt_water-vapor_global_" + tip + suffix +"-"+ker+"kernels.nc", format="NETCDF4")
-        wv.close()
+            wv_sw.name='water-vapor_sw'
+            radiation[(tip, 'water-vapor_sw')] = wv_sw
+            wv_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
+  
+            dRt_glob = ctl.global_mean(dRt)
+            wv= dRt_glob.compute()
+            wv.name='water-vapor'
+            radiation[(tip, 'water-vapor')] = wv
+            wv.to_netcdf(cart_out+ "dRt_water-vapor_global_" + tip + ".nc", format="NETCDF4")
+            wv.close()
         
     return radiation
 
+#CLOUD ANOMALY
+def Rad_anomaly_cloud(experiment, control, cart_out):
+    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+    dRt={}
+    
+    crf = experiment.ds_anom['Net0'] - experiment.ds_anom['Net']
+
+    # lat_target = np.linspace(-90, 90, 73)
+    # lon_target = np.linspace(0, 357.5, 144)
+    # crf = ctl.regrid_dataset(crf, lat_target, lon_target)
+    crf_glob= ctl.global_mean(crf).groupby('time.year').mean('time')
+
+    dRt = open_dRt(cart_out, names=dRt_nocloud)
+
+    dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud])
+    cloud = dRt_cloud.compute()
+    cloud.name='cloud'
+    cloud.to_netcdf(cart_out + "dRt_cloud_global.nc", format="NETCDF4")
+    return cloud
+
+
 #ALL RAD_ANOM COMPUTATION
-def calc_anoms_wrapper(config_file: str, ker, variable_mapping_file: str):
-    """
-    High-level wrapper for computing radiative anomaly components using
-    multiple kernel types and flexible configuration settings.
 
-    This function orchestrates the full anomaly-computation workflow:
-    it loads the configuration file, imports the kernel data, reads and
-    standardizes the input dataset, determines which variables and time
-    ranges to use, loads surface pressure if required, computes the
-    reference climatology, and finally calls `calc_anoms` to obtain all
-    anomaly components.
+def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, force_recompute=True):
 
-    Parameters
-    ----------
-    config_file : str or dict
-        Path to a YAML configuration file or an already-loaded dict.
-        The configuration must include:
-        - file_paths (input/output directories)
-        - anomaly_method
-        - time_range / time_range_exp (optional)
-        - pressure_data (for HUANG kernels)
-        - use_atm_mask, save_pattern (optional)
-
-    ker : str
-        Kernel type to use (`'ERA5'`, `'HUANG'`, `'SPECTRAL'`).
-        Determines which kernel loader is invoked.
-
-    variable_mapping_file : str
-        YAML file defining variable name mappings and computed variables,
-        used to standardize datasets through `standardize_names`.
-
-    Returns
-    -------
-    (anom_ps, anom_pal, anom_a, anom_wv) : tuple of xr.Dataset
-        The four major radiative anomaly components:
-        - Surface Planck anomaly
-        - Atmospheric Planck anomaly
-        - Albedo anomaly
-        - Water vapor anomaly
-
-    Workflow
-    --------
-    1. Load configuration settings.
-    2. Load kernels using `load_kernel_wrapper`.
-    3. Read and standardize the dataset via `read_data`.
-    4. Determine which variables and time ranges to use.
-    5. Load surface pressure if required by the kernel type.
-    6. Load reference climatology fields with `ref_clim`.
-    7. Compute anomalies via `calc_anoms`.
-
-    Notes
-    -----
-    - The function checks whether climatology and experiment time ranges
-      are provided and handles missing values gracefully.
-    - Surface pressure is only required for HUANG kernels; other kernel
-      families ignore this argument.
-    - This wrapper is the main user-facing entry point for computing
-      anomaly components in the workflow.
-    """
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file
-    
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'ts tas hus ta'.split()
-
-    if 'alb' in ds.variables:
-        allvars.append('alb')
-        print("Albedo (alb) detected in experiment dataset.")
-    elif 'rsus' in ds.variables and 'rsds' in ds.variables:
-        allvars.append('alb')
-        print("Albedo will be computed from rsus/rsds in experiment dataset.")
-    else:
-        print("Warning: Albedo variables not found in experiment dataset. Skipping albedo feedback.")
-    
-    allvars_c = 'rlutcs rsutcs rlut rsut'.split()
-    if all(var in ds.variables for var in allvars_c):
-        allvars = allvars + allvars_c  # extend the list
-    print("Read parameters from configuration file...")
-    
-    dataset_type = config.get('dataset_type', None)
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    use_atm_mask = config.get("use_atm_mask", True)
-    save_pattern = config.get("save_pattern", False)
-    use_atm_mask = bool(use_atm_mask)
-    save_pattern = bool(save_pattern)
-
-    # Read time ranges from config
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-    # Surface pressure management
-    surf_pressure = None
-    if ker == 'HUANG':  # HUANG requires surface pressure
-        pressure_path = config['file_paths'].get('pressure_data', None)
-        
-        if pressure_path:  # If pressure data is specified, load it
-            print("Loading surface pressure data...")
-            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
-            if not ps_files:
-                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
-            
-            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
-        else:
-            print("Using surface pressure passed as an array.")
-
-    print("Upload reference climatology for Rad anomaly...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers) 
-    
-    anom_ps, anom_pal, anom_a, anom_wv = calc_anoms(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern)
-
-    return (anom_ps, anom_pal, anom_a, anom_wv)
-
-def calc_anoms(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False):
-    """
-    Computes radiative anomalies for multiple feedback components using
-    precomputed kernels.
-
-    This function evaluates the radiative anomaly associated with several
-    radiative feedback components—surface Planck response, atmospheric
-    Planck response, albedo, and water vapor—by applying the selected
-    kernels to the input dataset. Each component is computed only if a
-    preprocessed NetCDF file is not already present; otherwise the function
-    loads the saved results to avoid redundant computation.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Input dataset containing the model or observational fields needed
-        to compute anomalies.
-
-    piok_rad : xr.Dataset
-        Reference climatology against which anomalies are computed.
-
-    ker : str
-        Identifier of the kernel type being used 
-        (e.g., `'ERA5'`, `'HUANG'`, `'SPECTRAL'`).
-
-    allkers : dict
-        Dictionary containing the kernels previously processed by a
-        kernel-loading function (e.g., `load_kernel_ERA5`).
-
-    cart_out : str
-        Output directory where anomaly components will be saved as
-        NetCDF files when first computed.
-
-    surf_pressure : xr.Dataset or None
-        Surface pressure dataset, required for certain kernel types (e.g. HUANG).
-        If not needed for the kernel type, can be left as `None`.
-
-    time_range : dict or None, optional
-        Time range to apply when computing anomalies (e.g. 
-        `{'start': '2000', 'end': '2010'}`).  
-        If `None`, the full dataset time range is used.
-
-    method : str, optional
-        Method used to compute anomalies (e.g., `'climatology'`, `'running_m'`,
-        `'climatology_mean'`, etc.).  
-        This determines the output filename suffix.
-
-    config_file : str or dict, optional
-        Path to a configuration YAML file or the already-loaded config dict.
-        Passed to subfunctions when additional settings are required.
-
-    use_atm_mask : bool, optional
-        If `True`, masks regions not used for atmospheric anomaly computation.
-
-    save_pattern : bool, optional
-        If `True`, also saves spatial anomaly patterns (not just global means).
-
-    Returns
-    -------
-    anom_ps : xr.Dataset
-        Radiative anomaly from the surface Planck response.
-
-    anom_pal : xr.Dataset
-        Radiative anomaly from the atmospheric Planck response.
-
-    anom_a : xr.Dataset
-        Radiative anomaly from surface albedo changes.
-
-    anom_wv : xr.Dataset
-        Radiative anomaly from water vapor changes.
-
-    Notes
-    -----
-    - The function avoids recomputation by checking whether output files
-      already exist in `cart_out`.
-    - The actual computation is delegated to the respective functions:
-        - `Rad_anomaly_planck_surf`
-      	- `Rad_anomaly_planck_atm_lr`
-      	- `Rad_anomaly_albedo`
-      	- `Rad_anomaly_wv`
-    - Output files follow the naming pattern:
-          dRt_<component>_global_clr_<method>-<ker>kernels.nc
-    """
-    # define suffix for saved files based on method only
-    suffix = f"_{method}"
-
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file
-
-    compute_cfg = config.get("compute", {})
-    compute_albedo = compute_cfg.get("albedo", True)
 
     print('planck surf')
-    path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
-        anom_ps = Rad_anomaly_planck_surf(ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern)
+    path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
+    if not os.path.exists(path) or force_recompute:
+        anom_ps = Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
     else:
+        print(f'Reading already computed anomaly from {path}')
         anom_ps = xr.open_dataset(path)
     
     print('planck atm')
-    path = os.path.join(cart_out, "dRt_planck-atmo_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
-        anom_pal = Rad_anomaly_planck_atm_lr(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range, config_file, method, use_atm_mask, save_pattern)
+    path = os.path.join(cart_out, "dRt_planck-atmo_global_clr.nc")
+    if not os.path.exists(path) or force_recompute:
+        anom_pal = Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
     else:
+        print(f'Reading already computed anomaly from {path}')
         anom_pal = xr.open_dataset(path)
     
     print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
-        anom_a = Rad_anomaly_albedo(ds, piok_rad, ker, allkers, cart_out, time_range, method, save_pattern)
+    path = os.path.join(cart_out, "dRt_albedo_global_clr.nc")
+    if not os.path.exists(path) or force_recompute:
+        anom_a = Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
     else:
+        print(f'Reading already computed anomaly from {path}')
         anom_a = xr.open_dataset(path)
     
     print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+ suffix +"-"+ker+"kernels.nc")
-    if not os.path.exists(path):
-        anom_wv = Rad_anomaly_wv(ds, piok_rad, ker, allkers, cart_out, surf_pressure, time_range, config_file, method, use_atm_mask, save_pattern)
+    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
+    if not os.path.exists(path) or force_recompute:
+        anom_wv = Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)
     else:
-        anom_wv = xr.open_dataset(path)  
+        print(f'Reading already computed anomaly from {path}')
+        anom_wv = xr.open_dataset(path) 
 
-    return anom_ps, anom_pal, anom_a, anom_wv 
+    print('cloud')
+    path = os.path.join(cart_out, "dRt_cloud_global.nc")
+    if not os.path.exists(path) or force_recompute:
+        anom_cloud = Rad_anomaly_cloud(experiment, control, cart_out)
+    else:
+        print(f'Reading already computed anomaly from {path}')
+        anom_cloud = xr.open_dataset(path) 
+
+    return anom_ps, anom_pal, anom_a, anom_wv, anom_cloud 
 
 ##FEEDBACK COMPUTATION
-def calc_fb_wrapper(config_file: str, ker, variable_mapping_file: str):
-    """
-    Wrapper function to compute radiative and cloud feedbacks based on the provided configuration file and kernel type.
-    
-    This function orchestrates the full workflow for calculating climate
-    feedbacks based on a configuration file. It loads kernels, climate datasets,
-    reference climatology, and surface pressure (if required), then calls
-    `calc_fb` to compute radiative and cloud feedbacks. Optional spatial
-    feedback patterns can also be saved.
-
-    Parameters
-    ----------
-    config_file : str or dict
-        Path to a YAML configuration file or an already-loaded configuration
-        dictionary. Must include:
-        - file_paths (input/output directories)
-        - anomaly_method
-        - time_range / time_range_exp (optional)
-        - pressure_data (required for HUANG kernels)
-        - use_atm_mask, save_pattern (optional)
-
-    ker : str
-        Kernel type to use (`'ERA5'`, `'HUANG'`, `'SPECTRAL'`). Determines
-        which kernel loader is invoked and whether surface pressure is required.
-
-    variable_mapping_file : str
-        Path to a YAML file defining variable name mappings and computed
-        variables, used to standardize datasets via `standardize_names`.
-
-    Returns
-    -------
-    fb_coef : dict
-        Dictionary of radiative feedback coefficients for each component
-        and atmospheric condition.
-
-    fb_cloud : xarray.DataArray
-        Cloud feedback data array computed from global mean regressions.
-
-    fb_cloud_err : xarray.DataArray
-        Error associated with the cloud feedback calculation.
-
-    fb_pattern : dict, optional
-        Dictionary of spatial feedback patterns and standard errors for each
-        component and atmospheric condition. Returned only if `save_pattern=True`.
-
-    """
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-    
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'ts tas hus alb ta'.split()
-    allvars_c = 'rlutcs rsutcs rlut rsut'.split()
-    if all(var in ds.variables for var in allvars_c):
-        allvars = allvars + allvars_c  
-    print("Read parameters from configuration file...")
-    
-    dataset_type = config.get('dataset_type', None)
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    use_atm_mask=config.get("use_atm_mask", True)
-    save_pattern = config.get("save_pattern", False)
-    use_atm_mask = bool(use_atm_mask)
-    save_pattern = bool(save_pattern)
-    num=config.get("num_year_regr", 10)
-
-    # Read time ranges from config
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-    # Surface pressure management
-    surf_pressure = None
-    if ker == 'HUANG':  # HUANG requires surface pressure
-        pressure_path = config['file_paths'].get('pressure_data', None)
         
-        if pressure_path:  # If pressure data is specified, load it
-            print("Loading surface pressure data...")
-            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
-            if not ps_files:
-                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
-            
-            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
-        else:
-            raise ValueError("HUANG kernels require surface pressure data, but none was provided.")
-        
-    print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
+dRt_all=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo', 'cloud']
+dRt_nocloud=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
 
-    outputs = calc_fb(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure,
-                    time_range_exp, method, config_file, use_atm_mask, save_pattern, num)
+def open_dRt(cart_out, names=dRt_all):
+    dRt= {}
+    for tip in ['clr', 'cld']:
+        for i in names:
+            if i != 'cloud':
+                dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_global_"+tip+ ".nc",  decode_times=time_coder)
+    if 'cloud' in names:
+        dRt[('cld', 'cloud')] = xr.open_dataarray(cart_out+"dRt_cloud_global.nc",  decode_times=time_coder)
+    return dRt
 
-    return outputs
-        
-    
-def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False, num=10):
-    """
-    Compute radiative and cloud feedbacks using preprocessed kernels.
 
-    This function calculates feedbacks from multiple radiative components:
-    - Planck surface
-    - Planck atmospheric
-    - Albedo
-    - Water vapor
 
-    It also computes cloud feedbacks by performing linear regression between
-    global mean temperature anomalies and radiative anomalies. Optionally,
-    spatial feedback patterns can be computed and saved.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing climate model output variables.
-
-    piok : xarray.Dataset
-        Reference climatology dataset used for computing radiative anomalies.
-
-    ker : str
-        Kernel type (e.g., `'HUANG'`) that determines specific calculations.
-
-    allkers : dict
-        Dictionary of kernels for the different radiative feedback components.
-
-    cart_out : str
-        Output directory where computed feedbacks and patterns are saved.
-
-    surf_pressure : xarray.Dataset or None
-        Surface pressure dataset, required for certain kernel types.
-
-    time_range : dict or None, optional
-        Time range used for computing anomalies, e.g.,
-        `{'start': '2000', 'end': '2010'}`. If `None`, full dataset range
-        is used.
-
-    method : str, optional
-        Method used for anomaly computation. Options include:
-        - `"climatology"`: monthly averaged climatology
-        - `"running_m"`: 21-year running mean
-        - `"climatology_mean"`: time-averaged anomaly
-        - `"running_m_mean"`: running mean anomaly
-
-    config_file : str or dict, optional
-        Configuration settings passed to subfunctions if needed.
-
-    use_atm_mask : bool, optional
-        If `True`, masks regions not used in atmospheric anomaly calculations.
-
-    save_pattern : bool, optional
-        If `True`, computes and saves spatial feedback patterns and
-        standard errors.
-
-    num : int, optional
-        Number of years per regression block when grouping anomalies for
-        decadal averaging (default 10).
-
-    Returns
-    -------
-    fb_coef : dict
-        Radiative feedback coefficients for each component and condition
-        (`'clr'` or `'cld'`).
-
-    fb_cloud : xarray.DataArray
-        Cloud feedback data array derived from global mean regressions.
-
-    fb_cloud_err : xarray.DataArray
-        Error associated with the cloud feedback calculation.
-
-    fb_pattern : dict or None
-        Dictionary of spatial feedback slopes and standard errors for each
-        component and condition. Only returned if `save_pattern=True`.
-    """
-
-    if 'tas' not in piok:
-        raise ValueError("Reference climatology for 'tas' is missing in piok. Ensure 'tas' is included in 'allvars' when calling ref_clim.")
-    
-    # define suffix for saved files based on method only
-    suffix = f"_{method}"
-
+def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num=10):
+   
     print('planck surf')
-    path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+suffix+"-"+ker+"kernels.nc")
+    path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
     if not os.path.exists(path):
-        Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, time_range, method, save_pattern)
+        Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
     
     print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr"+suffix+"-"+ker+"kernels.nc")
+    path = os.path.join(cart_out, "dRt_albedo_global_clr.nc")
     if not os.path.exists(path):
-        Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, time_range, method, save_pattern)
+        Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
     
     print('planck atm')
-    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld"+suffix+"-"+ker+"kernels.nc")
+    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld.nc")
     if not os.path.exists(path):
-        Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure, time_range, config_file, method, use_atm_mask, save_pattern)
+        Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
     
     print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+suffix+"-"+ker+"kernels.nc")
+    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
     if not os.path.exists(path):
-        Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range, config_file, method, use_atm_mask, save_pattern)    
+        Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)   
+
+    print('cloud')
+    path = os.path.join(cart_out, "dRt_cloud_global.nc")
+    if not os.path.exists(path):
+        Rad_anomaly_cloud(experiment, control, cart_out)
+    
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+    dRt={}
     fb_coef = dict()
     fb_pattern = dict()
+    dRt=open_dRt(cart_out)
 
     #compute gtas
-    k=allkers[('cld', 't')]
-    if time_range is not None:
-        var_tas = ds['tas'].sel(time=slice(time_range['start'], time_range['end'])) 
-        var_tas= ctl.regrid_dataset(var_tas, k.lat, k.lon)  
-    else:
-        var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon) 
 
-    anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, nonlinear=False, check=True)
-
-    gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
+    gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
     gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
 
@@ -2429,9 +1899,8 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, me
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
-            feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ suffix +"-"+ker+"kernels.nc",  use_cftime=True)
-            start_year = int(feedbacks.year.min())
-            feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
+            start_year = int(dRt[(tip, fbn)].year.min())
+            feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num * num).mean()
 
             res = stats.linregress(gtas, feedback)
             fb_coef[(tip, fbn)] = res
@@ -2439,284 +1908,67 @@ def calc_fb(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, me
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
-                feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip + suffix +"-"+ker+"kernels.nc", use_cftime=True) 
+                feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip +".nc", decode_times=time_coder) 
                 start_year = int(feedbacks_pattern.year.min())
                 feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num * num).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
                 # Perform regression at each grid point
                 slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
                 fb_pattern[(tip, fbn)] = (slope, stderr)
-                slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
-                stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+                slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
+                stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
     
-    #cloud
-    required_cloud_vars = {"rlut", "rsut", "rlutcs", "rsutcs"}
-    can_compute_cloud = required_cloud_vars.issubset(set(ds.variables))
-    if can_compute_cloud:
-        print('cloud feedback calculation...')
-        fb_cloud, fb_cloud_err = feedback_cloud(ds, piok, fb_coef, gtas, time_range, num)
-    else:
-        print("Cloud variables not found → skipping cloud feedback.")
-        fb_cloud = None
-        fb_cloud_err = None
+    start_year = int(dRt[('cld', 'cloud')].year.min())
+    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num * num).mean()
+    fb_coef[('cld', 'cloud')] = stats.linregress(gtas, feedback)
     
     return {
         "fb_coeffs": fb_coef,
-        "fb_cloud": fb_cloud,
-        "fb_cloud_err": fb_cloud_err,
         "fb_pattern": fb_pattern if save_pattern else None,
     }
+
 
 def calc_inter(ds, running_years):
     med = ctl.running_mean(ds, running_years)
     trend=ds-med
     return trend
 
-def calc_fb_interannual_wrapper(config_file: str, ker, variable_mapping_file: str):
-    """
-    Wrapper function for computing interannual radiative and cloud feedbacks.
 
-    This function manages the full workflow for interannual feedback calculation,
-    using a running-mean approach to remove decadal trends from global mean
-    temperature and radiative anomalies. It loads kernels, climate datasets,
-    reference climatology, and surface pressure (if required), then calls
-    `calc_fb_interannual` to compute the feedbacks. Optionally, spatial feedback
-    patterns can also be saved.
-
-    Parameters
-    ----------
-    config_file : str or dict
-        Path to a YAML configuration file or a preloaded configuration dictionary.
-        Must include:
-        - file_paths (input/output directories)
-        - anomaly_method
-        - time_range / time_range_exp (optional)
-        - pressure_data (required for HUANG kernels)
-        - use_atm_mask, save_pattern (optional)
-        - num_running_years_trend (number of years for running mean)
-
-    ker : str
-        Kernel type to use (`'ERA5'`, `'HUANG'`, `'SPECTRAL'`). Determines
-        which kernel loader is invoked and whether surface pressure is required.
-
-    variable_mapping_file : str
-        Path to a YAML file defining variable name mappings and computed
-        variables, used to standardize datasets via `standardize_names`.
-
-    Returns
-    -------
-    fb_coef : dict
-        Dictionary of interannual radiative feedback coefficients for each
-        component and atmospheric condition.
-
-    fb_cloud : xarray.DataArray
-        Cloud feedback data array computed using interannual variations.
-
-    fb_cloud_err : xarray.DataArray
-        Error associated with the interannual cloud feedback calculation.
-
-    fb_pattern : dict, optional
-        Dictionary of spatial interannual feedback slopes and standard errors
-        for each component and atmospheric condition. Returned only if
-        `save_pattern=True`.
+def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, running_years=25):   
    
-    """
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-    
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'ts tas hus alb ta'.split()
-    allvars_c = 'rlutcs rsutcs rlut rsut'.split()
-    if all(var in ds.variables for var in allvars_c):
-        allvars = allvars + allvars_c  
-    print("Read parameters from configuration file...")
-
-
-    dataset_type = config.get('dataset_type', None)
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    use_atm_mask=config.get("use_atm_mask", True)
-    save_pattern = config.get("save_pattern", False)
-    use_atm_mask = bool(use_atm_mask)
-    save_pattern = bool(save_pattern)
-    running_years=config.get("num_running_years_trend", 10)
-    
-    # Read time ranges from config
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-    # Surface pressure management
-    surf_pressure = None
-    if ker == 'HUANG':  # HUANG requires surface pressure
-        pressure_path = config['file_paths'].get('pressure_data', None)
-        
-        if pressure_path:  # If pressure data is specified, load it
-            print("Loading surface pressure data...")
-            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
-            if not ps_files:
-                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
-            
-            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords')
-            surf_pressure = standardize_names(surf_pressure, dataset_type, variable_mapping_file)
-        else:
-            raise ValueError("HUANG kernels require surface pressure data, but none was provided.")
-        
-    print("Upload reference climatology...")
-    ref_clim_data = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
-
-    outputs = calc_fb_interannual(ds, ref_clim_data, ker, allkers, cart_out, surf_pressure, time_range_exp, method, config_file, use_atm_mask, save_pattern, running_years)
-
-    return outputs
-
-
-def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_range=None, method=None, config_file =None, use_atm_mask=True, save_pattern=False, running_years=25):   
-    """
-    Compute interannual radiative and cloud feedbacks using a running-mean approach.
-
-    This function calculates feedbacks from multiple radiative components:
-    - Planck surface
-    - Planck atmospheric
-    - Albedo
-    - Water vapor
-
-    Unlike the standard feedback calculation, this function removes long-term
-    trends using a running mean over `running_years` to isolate interannual
-    variability. Cloud feedbacks are computed via linear regression between
-    detrended global mean temperature anomalies and radiative anomalies. Spatial
-    feedback patterns can also be computed and saved if requested.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing climate model output variables.
-
-    piok : xarray.Dataset
-        Reference climatology dataset used for computing radiative anomalies.
-
-    ker : str
-        Kernel type (e.g., `'HUANG'`) that determines specific calculations.
-
-    allkers : dict
-        Dictionary of kernels for the different radiative feedback components.
-
-    cart_out : str
-        Output directory where computed feedbacks and patterns are saved.
-
-    surf_pressure : xarray.Dataset or None
-        Surface pressure dataset, required for certain kernel types.
-
-    time_range : dict or None, optional
-        Time range used for computing anomalies, e.g.,
-        `{'start': '2000', 'end': '2010'}`. If `None`, full dataset range
-        is used.
-
-    method : str, optional
-        Method used for anomaly computation. Options include:
-        - `"climatology"`: monthly averaged climatology
-        - `"running_m"`: 21-year running mean
-        - `"climatology_mean"`: time-averaged anomaly
-        - `"running_m_mean"`: running mean anomaly
-
-    config_file : str or dict, optional
-        Configuration settings passed to subfunctions if needed.
-
-    use_atm_mask : bool, optional
-        If `True`, masks regions not used in atmospheric anomaly calculations.
-
-    save_pattern : bool, optional
-        If `True`, computes and saves spatial feedback patterns and
-        standard errors.
-
-    running_years : int, optional
-        Number of years for the running mean used to remove trends
-        (default is 25).
-
-    Returns
-    -------
-    fb_coef : dict
-        Interannual radiative feedback coefficients for each component and
-        condition (`'clr'` or `'cld'`).
-
-    fb_cloud : xarray.DataArray
-        Cloud feedback data array derived from interannual regressions.
-
-    fb_cloud_err : xarray.DataArray
-        Error associated with the interannual cloud feedback calculation.
-
-    fb_pattern : dict or None
-        Dictionary of spatial feedback slopes and standard errors for each
-        component and condition. Only returned if `save_pattern=True`.
-    Notes
-    -----
-    - Removes long-term trends via a running mean before computing feedbacks.
-    - Performs linear regression between detrended global mean temperature
-      anomalies and radiative anomalies for each component.
-    - Handles optional spatial feedback calculation.
-    - Useful for analyzing interannual variability in climate feedbacks.
-    """
-
-    if 'tas' not in piok:
-        raise ValueError("Reference climatology for 'tas' is missing in piok. Ensure 'tas' is included in 'allvars' when calling ref_clim.")
-    
-    # define suffix for saved files based on method only
-    suffix = f"_{method}"
-
     print('planck surf')
-    path = os.path.join(cart_out, "dRt_planck-surf_global_clr"+suffix+"-"+ker+"kernels.nc")
+    path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
     if not os.path.exists(path):
-        Rad_anomaly_planck_surf(ds, piok, ker, allkers, cart_out, time_range, method, save_pattern)
+        Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
     
     print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr"+suffix+"-"+ker+"kernels.nc")
+    path = os.path.join(cart_out, "dRt_albedo_global_clr.nc")
     if not os.path.exists(path):
-        Rad_anomaly_albedo(ds, piok, ker, allkers, cart_out, time_range, method, save_pattern)
+        Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
     
     print('planck atm')
-    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld"+suffix+"-"+ker+"kernels.nc")
+    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld.nc")
     if not os.path.exists(path):
-        Rad_anomaly_planck_atm_lr(ds, piok, ker, allkers, cart_out, surf_pressure, time_range, config_file, method, use_atm_mask, save_pattern)
+        Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
     
     print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr"+suffix+"-"+ker+"kernels.nc")
+    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
     if not os.path.exists(path):
-        Rad_anomaly_wv(ds, piok, ker, allkers, cart_out, surf_pressure, time_range, config_file, method, use_atm_mask, save_pattern)    
+        Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern) 
+
+    print('cloud')
+    path = os.path.join(cart_out, "dRt_cloud_global.nc")
+    if not os.path.exists(path):
+        Rad_anomaly_cloud(experiment, control, cart_out)
+    
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+    dRt={}
     fb_coef = dict()
     fb_pattern = dict()
+    dRt=open_dRt(cart_out)
 
     #compute gtas
-    k=allkers[('cld', 't')]
-    if time_range is not None:
-        var_tas = ds['tas'].sel(time=slice(time_range['start'], time_range['end'])) 
-        var_tas= ctl.regrid_dataset(var_tas, k.lat, k.lon)  
-    else:
-        var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon)
-
-    anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, nonlinear=False, check=True) 
-    
-    gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
+    gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     temp= calc_inter(gtas, running_years)
 
     if save_pattern:
@@ -2727,15 +1979,14 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
-            feedbacks=xr.open_dataarray(cart_out+"dRt_" +fbn+"_global_"+tip+ suffix +"-"+ker+"kernels.nc",  use_cftime=True)
-            inter=calc_inter(feedbacks, running_years)
+            inter=calc_inter(dRt[(tip, fbn)], running_years)
 
             res = stats.linregress(temp,inter)
             fb_coef[(tip, fbn)] = res
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
-                feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+suffix+"-"+ker+"kernels.nc", use_cftime=True)
+                feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+ ".nc", decode_times=time_coder)
                 feedbacks_pattern_dec=calc_inter(feedbacks_pattern, running_years)              
 
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
@@ -2743,320 +1994,63 @@ def calc_fb_interannual(ds, piok, ker, allkers, cart_out, surf_pressure, time_ra
                 # Perform regression at each grid point
                 slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas1)
                 fb_pattern[(tip, fbn)] = (slope, stderr)
-                slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
-                stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + suffix + "-" + ker + "kernels.nc", format="NETCDF4")
+                slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
+                stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip +  ".nc", format="NETCDF4")
 
     #cloud
-    required_cloud_vars = {"rlut", "rsut", "rlutcs", "rsutcs"}
-    can_compute_cloud = required_cloud_vars.issubset(set(ds.variables))
-    if can_compute_cloud:
-        print('cloud interannual feedback calculation...')
-        fb_cloud, fb_cloud_err = feedback_cloud_interannual(ds, piok, fb_coef, temp, time_range, running_years)
-    else:
-        print("Cloud variables not found → skipping cloud feedback.")
-        fb_cloud = None
-        fb_cloud_err = None
+    inter=calc_inter(dRt[('cld', 'cloud')], running_years)
+    res = stats.linregress(temp,inter)
+    fb_coef['cld', 'cloud'] = res
     
     return {
         "fb_coeffs": fb_coef,
-        "fb_cloud": fb_cloud,
-        "fb_cloud_err": fb_cloud_err,
         "fb_pattern": fb_pattern if save_pattern else None,
-    }
+    }    
+
+
+def single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_mask=True, save_pattern=False, num=10):
     
-
-#CLOUD FEEDBACK shell 2008
-def feedback_cloud(ds, piok, fb_coef, surf_anomaly, time_range=None, num=10):
-    """
-    Compute cloud radiative feedback strength and associated error.
-
-    This function calculates cloud feedback as the difference between net
-    radiative flux anomalies under all-sky and clear-sky conditions. It
-    performs linear regression between global mean surface temperature anomalies
-    and radiative fluxes to obtain the cloud feedback slope and its uncertainty.
-    Radiative anomalies are regridded to a common spatial grid and optionally
-    restricted to a specific time range.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing radiative flux variables:
-        - 'rlut' : Outgoing longwave radiation at top of atmosphere (all-sky)
-        - 'rsut' : Reflected shortwave radiation (all-sky)
-        - 'rlutcs' : Outgoing longwave radiation (clear-sky)
-        - 'rsutcs' : Reflected shortwave radiation (clear-sky)
-
-    piok : xarray.Dataset
-        Reference climatology used to compute radiative anomalies.
-
-    fb_coef : dict
-        Dictionary of radiative feedback coefficients for non-cloud components
-        (Planck, albedo, water vapor, lapse rate).
-
-    surf_anomaly : xarray.DataArray
-        Global mean surface temperature anomalies used for regression.
-        Expected to be pre-processed as:
-        ```
-        gtas = ctl.global_mean(tas_anomaly).groupby('time.year').mean('time')
-        gtas = gtas.groupby((gtas.year-1)//10*10).mean()
-        ```
-
-    time_range : dict, optional
-        Time range for selecting data from `ds`, e.g.,
-        `{'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD'}`. Default is None
-        (full time range is used).
-
-    num : int, optional
-        Number of years to aggregate in regressions (default is 10).
-
-    Returns
-    -------
-    fb_cloud : float
-        Cloud radiative feedback strength (W/m²/K).
-
-    fb_cloud_err : float
-        Estimated standard error of the cloud feedback calculation (W/m²/K).
-    """
-    if not (ds['rlut'].dims == ds['rsutcs'].dims):
-        raise ValueError("Error: The spatial grids ('lon' and 'lat') datasets must match.")
-    
-    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
-    
-    if time_range is not None:
-        rlut=ds['rlut'].sel(time=slice(time_range['start'], time_range['end']))
-        rsut=ds['rsut'].sel(time=slice(time_range['start'], time_range['end']))
-        rsutcs = ds['rsutcs'].sel(time=slice(time_range['start'], time_range['end']))
-        rlutcs = ds['rlutcs'].sel(time=slice(time_range['start'], time_range['end']))
-    else:
-        rlut=ds['rlut']
-        rsut=ds['rsut']
-        rsutcs = ds['rsutcs']
-        rlutcs = ds['rlutcs']
-
-    N = - rlut - rsut
-    N0 = - rsutcs - rlutcs
-    crf = (N0 - N) 
-
-    lat_target = np.linspace(-90, 90, 73)
-    lon_target = np.linspace(0, 357.5, 144)
-    crf = ctl.regrid_dataset(crf, lat_target, lon_target)
-
-    crf_glob = ctl.global_mean(crf).groupby('time.year').mean('time')
-    N_glob = ctl.global_mean(N).groupby('time.year').mean('time')
-    N0_glob = ctl.global_mean(N0).groupby('time.year').mean('time')
-    start_year = int(crf_glob.year.min()) 
-    crf_glob = crf_glob.groupby((crf_glob.year-start_year) // num * num).mean()
-    start_year = int(N_glob.year.min()) 
-    N_glob = N_glob.groupby((N_glob.year-start_year) // num * num).mean()
-    start_year = int(N0_glob.year.min()) 
-    N0_glob = N0_glob.groupby((N0_glob.year-start_year) // num * num).mean()
-
-    res_N = stats.linregress(surf_anomaly, N_glob)
-    res_N0 = stats.linregress(surf_anomaly, N0_glob)
-    res_crf = stats.linregress(surf_anomaly, crf_glob)
-
-    F0 = res_N0.intercept + piok[('rlutcs')] + piok[('rsutcs')] 
-    F = res_N.intercept + piok[('rlut')] + piok[('rsut')]
-    F0.compute()
-    F.compute()
-
-    F_glob = ctl.global_mean(F)
-    F0_glob = ctl.global_mean(F0)
-    F_glob = F_glob.compute()
-    F0_glob = F0_glob.compute()
-
-    fb_cloud = -res_crf.slope + np.nansum([fb_coef[( 'clr', fbn)].slope - fb_coef[('cld', fbn)].slope for fbn in fbnams]) #letto in Caldwell2016
-
-    fb_cloud_err = np.sqrt(res_crf.stderr**2 + np.nansum([fb_coef[('cld', fbn)].stderr**2 for fbn in fbnams]))
-
-    
-    return fb_cloud, fb_cloud_err
-
-def feedback_cloud_interannual(ds, piok, fb_coef, surf_anomaly, time_range=None, running_years=25):
-    """
-    Compute interannual cloud radiative feedback and associated error.
-
-    This function calculates cloud feedback on interannual timescales by first
-    removing multi-year running mean trends from radiative fluxes and temperature
-    anomalies. It performs linear regression between detrended global mean
-    surface temperature anomalies and detrended cloud radiative fluxes
-    (difference between all-sky and clear-sky net radiation) to estimate the
-    cloud feedback slope and its uncertainty.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing radiative flux variables:
-        - 'rlut' : Outgoing longwave radiation at top of atmosphere (all-sky)
-        - 'rsut' : Reflected shortwave radiation (all-sky)
-        - 'rlutcs' : Outgoing longwave radiation (clear-sky)
-        - 'rsutcs' : Reflected shortwave radiation (clear-sky)
-
-    piok : xarray.Dataset
-        Reference climatology dataset used for baseline radiative fluxes.
-
-    fb_coef : dict
-        Dictionary of radiative feedback coefficients for non-cloud components
-        (Planck, albedo, water vapor, lapse rate) used in the cloud feedback
-        calculation.
-
-    surf_anomaly : xarray.DataArray
-        Global mean surface temperature anomalies (detrended) used for regression.
-
-    time_range : dict, optional
-        Time range for selecting data from `ds`, e.g.,
-        `{'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD'}`. Default is None
-        (full time range is used).
-
-    running_years : int, optional
-        Number of years to apply running mean for detrending interannual
-        variations (default is 25 years).
-
-    Returns
-    -------
-    fb_cloud : float
-        Interannual cloud radiative feedback strength (W/m²/K).
-
-    fb_cloud_err : float
-        Estimated standard error of the interannual cloud feedback calculation
-        (W/m²/K).
-    """
-
-    if not (ds['rlut'].dims == ds['rsutcs'].dims):
-        raise ValueError("Error: The spatial grids ('lon' and 'lat') datasets must match.")
-    
-    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
-    
-    if time_range is not None:
-        rlut=ds['rlut'].sel(time=slice(time_range['start'], time_range['end']))
-        rsut=ds['rsut'].sel(time=slice(time_range['start'], time_range['end']))
-        rsutcs=ds['rsutcs'].sel(time=slice(time_range['start'], time_range['end']))
-        rlutcs = ds['rlutcs'].sel(time=slice(time_range['start'], time_range['end']))
-    else:
-        rlut=ds['rlut']
-        rsut=ds['rsut']
-        rsutcs = ds['rsutcs']
-        rlutcs = ds['rlutcs']
-
-    N = - rlut - rsut
-    N0 = - rsutcs - rlutcs
-
-    crf = (N0 - N) 
-    crf = crf.groupby('time.year').mean('time')
-
-    N = N.groupby('time.year').mean('time')
-    N0 = N0.groupby('time.year').mean('time')
-
-    crf_glob = ctl.global_mean(crf).compute()
-    trend_crf_glob = calc_inter(crf_glob, running_years)
-    N_glob = ctl.global_mean(N).compute()
-    trend_N_glob = calc_inter(N_glob, running_years)
-    N0_glob = ctl.global_mean(N0).compute()
-    trend_N0_glob = calc_inter(N0_glob, running_years)
-    
-
-    res_N = stats.linregress(surf_anomaly, trend_N_glob)
-    res_N0 = stats.linregress(surf_anomaly, trend_N0_glob)
-    res_crf = stats.linregress(surf_anomaly, trend_crf_glob)
-
-    F0 = res_N0.intercept + piok[('rlutcs')] + piok[('rsutcs')] 
-    F = res_N.intercept + piok[('rlut')] + piok[('rsut')]
-    F0.compute()
-    F.compute()
-
-    F_glob = ctl.global_mean(F)
-    F0_glob = ctl.global_mean(F0)
-    F_glob = F_glob.compute()
-    F0_glob = F0_glob.compute()
-
-    fb_cloud = -res_crf.slope + np.nansum([fb_coef[( 'clr', fbn)].slope - fb_coef[('cld', fbn)].slope for fbn in fbnams]) #letto in Caldwell2016
-
-    fb_cloud_err = np.sqrt(res_crf.stderr**2 + np.nansum([fb_coef[('cld', fbn)].stderr**2 for fbn in fbnams]))
-
-    
-    return fb_cloud, fb_cloud_err
-
-def single_feedback_wrapper(name:str, config_file: str, ker, variable_mapping_file: str):
-    if isinstance(config_file, str):
-        with open(config_file, 'r') as file:
-            config = yaml.safe_load(file)
-    else:
-        config = config_file 
-    
-    print("Kernel upload...")
-    allkers = load_kernel_wrapper(ker, config_file)
-    print("Dataset to analyze upload...")
-    ds = read_data(config_file, variable_mapping_file)
-    print("Variables to consider upload...")
-    allvars = 'tas'.split()
-    piok = ref_clim(config_file, allvars, ker, variable_mapping_file, allkers=allkers) 
-    cart_out = config['file_paths'].get("output")
-    method = config.get("anomaly_method")
-    if method is None:
-        raise ValueError("The config file must specify 'anomaly_method' (e.g., 'climatology', 'running_m', 'climatology_mean', 'running_m_mean')")
-    num=config.get("num_year_regr", 10)
-    time_range_clim = config.get("time_range", {})
-    time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
-    time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
-    time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
-    # Determine usage scenario
-    if time_range_exp and not time_range_clim:
-        print("Only experiment time range is provided. Using it for analysis.")
-    elif time_range_exp and time_range_clim:
-        print(f"Using separate time ranges for climatology: {time_range_clim} and experiment: {time_range_exp}")
-    elif time_range_clim and not time_range_exp:
-        print("Only climatology time range is provided. Using it for both climatology and experiment.")
-        time_range_exp = time_range_clim  # fallback
-    else:
-        print("No valid time ranges provided. Proceeding with full time range in the data.")
-
-
-    fb=dict()
-    fb=single_feedback(name, config_file, ker, variable_mapping_file, cart_out, allkers,  ds, piok, time_range_exp, method, num )
-    return fb
-
-
-
-def single_feedback(name, config_file, ker, variable_mapping_file, cart_out, allkers, ds, piok, time_range, method, num):
-    suffix = f"_{method}"
-    k=allkers[('cld', 't')]
-    if time_range is not None:
-        var_tas = ds['tas'].sel(time=slice(time_range['start'], time_range['end'])) 
-        var_tas= ctl.regrid_dataset(var_tas, k.lat, k.lon)  
-    else:
-        var_tas= ctl.regrid_dataset(ds['tas'], k.lat, k.lon) 
-
-    anoms_tas = compute_anomalies(var_tas, piok['tas'], method=method, nonlinear=False, check=True)
-
-    gtas = ctl.global_mean(anoms_tas).groupby('time.year').mean('time')
+    gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
     gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
-    path = os.path.join(cart_out, "dRt_"+name+"_global_clr"+suffix+"-"+ker+"kernels.nc")
+    
+    if name != 'cloud':
+        path = os.path.join(cart_out, "dRt_"+name+"_global_clr.nc")
+    else:
+        path = os.path.join(cart_out, "dRt_"+name+"_global.nc")
     if not os.path.exists(path):
         print('Using '+name + ' radiation anomalies function')
         if name=='albedo':
-            Rad_anomaly_albedo_wrapper(config_file, ker, variable_mapping_file)
+            Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
 
         elif name=='planck-surf':
-            Rad_anomaly_planck_surf_wrapper(config_file, ker, variable_mapping_file)
+            Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
 
         elif name=='planck-atmo':
-            Rad_anomaly_planck_atm_lr_wrapper(config_file, ker, variable_mapping_file)
+            Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
 
         elif name=='water-vapor':
-            Rad_anomaly_wv_wrapper(config_file, ker, variable_mapping_file)
+            Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)
 
         elif name=='lapse-rate':
-            Rad_anomaly_planck_atm_lr_wrapper(config_file, ker, variable_mapping_file)
+            Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
+        
+        elif name == 'cloud':
+            Rad_anomaly_cloud(experiment, control, cart_out)
     
     fb=dict()
-    for tip in ['clr', 'cld']:
-        feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+ suffix +"-"+ker+"kernels.nc",  use_cftime=True)
+    if name!='cloud':
+        for tip in ['clr', 'cld']:
+            feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+".nc",  decode_times=time_coder)
+            start_year = int(feedbacks.year.min())
+            feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
+
+            res = stats.linregress(gtas, feedback)
+            fb[(tip, name)] = res
+    else:
+        feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global.nc",  decode_times=time_coder)
         start_year = int(feedbacks.year.min())
         feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
-
-        res = stats.linregress(gtas, feedback)
-        fb[(tip, name)] = res
+        fb = stats.linregress(gtas, feedback)
 
     return fb

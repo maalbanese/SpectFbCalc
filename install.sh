@@ -18,4 +18,5 @@ fi
 
 $PACKAGE_MANAGER env create -n spectfbcalc -f environment.yml
 
-
+$PACKAGE_MANAGER activate spectfbcalc
+python3 -m ipykernel install --user --name=spectfbcalc

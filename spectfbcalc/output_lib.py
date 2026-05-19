@@ -45,8 +45,6 @@ def save_feedback_output(output, out_path_txt, out_path_nc=None):
         raise ValueError("Expected output to be a dict with keys: fb_coeffs, fb_cloud, fb_cloud_err, fb_pattern")
 
     fb_coeffs = output.get("fb_coeffs")
-    fb_cloud = output.get("fb_cloud")
-    fb_cloud_err = output.get("fb_cloud_err")
     fb_pattern = output.get("fb_pattern")
 
     # ---------- TXT output ----------
@@ -54,7 +52,7 @@ def save_feedback_output(output, out_path_txt, out_path_nc=None):
         with open(out_path_txt, "w") as f:
             def write_block(name, results_dict):
                 f.write(f"{name} feedback:\n")
-                for key in ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']:
+                for key in ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo', 'cloud']:
                     result = results_dict.get((name, key))
                     if result is not None:
                         f.write(f"{key.replace('_', '-') + ' feedback'}: {result.slope:.4f}\n")
@@ -63,11 +61,8 @@ def save_feedback_output(output, out_path_txt, out_path_nc=None):
             if fb_coeffs is not None:
                 write_block("cld", fb_coeffs)
                 write_block("clr", fb_coeffs)
-            if fb_cloud is not None and fb_cloud_err is not None:
-                f.write(f"cloud feedback: {fb_cloud:.4f}\n")
-                f.write(f"cloud feedback error: {fb_cloud_err:.4f}\n")
 
-    print(f"Saved feedback coefficients to {out_path_txt}")
+    print(f"Saved feedback coefficients to {out_path_txt}, new one")
 
     # ---------- NetCDF output ----------
     if out_path_nc and fb_pattern is not None:

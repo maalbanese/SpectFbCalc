@@ -2,7 +2,7 @@ name: spectfbcalc
 channels:
 - conda-forge
 dependencies:
-- python<3.12
+- python
 - netcdf4
 - cartopy
 - eofs
@@ -14,8 +14,13 @@ dependencies:
 - dask
 - cfgrib
 - xesmf>0.8
+- esmf=8.8.1
+- esmpy=8.8.1
 - cdo
 - cdsapi
 - python-cdo
+- ipykernel
+- dask-jobqueue
 - pip:
+  - smmregrid
   - -e ClimTools
