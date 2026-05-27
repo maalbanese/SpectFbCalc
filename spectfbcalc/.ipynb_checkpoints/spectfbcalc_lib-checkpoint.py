@@ -226,8 +226,7 @@ class Experiment:
             print("Saving remapped to disk")
             for var in remapped:
                 print(var)
-                remapped[var] = remapped[var].compute()
-                remapped[var].to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
+                remapped[var] = remapped[var].compute().to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
             
         self.ds = xr.merge([remapped[var] for var in remapped])
 
@@ -329,8 +328,8 @@ class Experiment:
     
     def Net_TOA(self):
         print('Creating Net TOA variables')
-        self.ds['Net'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut'] #net_toa_allsky
-        self.ds['Net0'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs'] #net_toa_clr
+        self.ds['Net'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut'] #net_toa
+        self.ds['Net0'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs'] #net_toa_cs
  
     
     def check_albedo(self) -> None:
@@ -692,7 +691,6 @@ def load_kernel_ERA5(cart_k, finam):
             if vna=='wv_sw_dp':
                 ker=ker.rename({'level': 'plev'})
                 vna='wv_sw'
-                
             if tip=='clr':
                 stef=ker.TOA_clr
             else:
@@ -1197,9 +1195,9 @@ def pice(T):
     pice = np.exp(9.550426 - 5723.265 / T + 3.53068 * np.log(T) - 0.00728332 * T) / 100.0
     return pice
 
-def dlnws_old(T):
+def dlnws(T):
     """
-    Calculates 1/(dlnq/dT_1K) using Huang et al. (2017) formulas.
+    Calculates 1/(dlnq/dT_1K).
     """
     pliq0 = pliq(T)
     pice0 = pice(T)
@@ -1225,88 +1223,6 @@ def dlnws_old(T):
         dws = ctl.transform_to_dataarray(T, dws, 'dlnws')
    
     return dws
-
-
-def q2(e, p = 1e3):
-    """
-    Saturation specific humidity, given saturation vapor pressure and P (in hPa).
-    """
-    return 0.622*e/(p - 0.378*e)
-
-
-def calc_qsat(temp, pres = 1.e3):
-    """
-    Computes the saturation specific humidity.
-    temp in K
-    pres in hPa
-    """
-
-    # Following Murphy and Koop 2005
-    # ew = 0.01*np.exp(54.842763 - 6763.22/T - 4.210*np.log(T) + 0.000367*T + np.tanh(0.0415*(T - 218.8)) * (53.878 - 1331.22/T - 9.44523*np.log(T) + 0.014025*T))
-    # ei = 0.01*np.exp(9.550426 - 5723.265/T + 3.53068*np.log(T) - 0.00728332*T)
-
-    # simplified formulas (WMO)
-    t = temp - 273.15
-    ew = 6.112 * np.exp(17.62 * t / (243.12 + t))
-    ei = 6.112 * np.exp(22.46 * t / (272.62 + t))
-
-    # use ice vs water
-    if isinstance(temp, xr.DataArray):
-        e = xr.where(t > 0, ew, ei)
-    else:
-        e = np.where(t > 0, ew, ei)
-
-    qsat = q2(e, pres)
-
-    return qsat
-
-
-def Kq_fact(temp, method, pres = None):
-    """
-    Factor used to normalize the water vapor kernel, which usually corresponds to a change in specific humidity due to an increase of atm temp by 1 K, keeping RH constant.
-    """
-    if pres is None:
-        if isinstance(temp, xr.DataArray):
-            pres = temp.plev
-        else:
-            raise ValueError('pres not specified in input to Kq_fact')
-    
-    Rv = 461.5 # gas constant of water vapor
-    Lv = 2.5e+06 # latent heat of water vapor
-
-    qs0 = calc_qsat(temp, pres = pres)
-    qs1K = calc_qsat(temp + 1, pres = pres)
-
-    if method == 'log': # Huang, 2017 (HUANG)
-        cos = 1/np.log(qs1K/qs0)
-    elif method == 'linear': # Huang and Huang, 2023 (ERA5)
-        cos = qs0/(qs1K - qs0)
-    elif method == 'CC': # approximation using CC, as in Huang and Huang, eq. A6
-        cos = temp**2 * Rv / Lv
-    else:
-        raise ValueError(f'method {method} not recognized')
-
-    return cos
-
-
-# function dlnws(T)
-# begin
-
-# pliq=0.01*exp(54.842763- 6763.22/T-4.21*log(T) + 0.000367*T+tanh(0.0415*(T-218.8))*\
-#                 (53.878 -1331.22/T-9.44523*log(T) + 0.014025*T))
-# pice=exp(9.550426-5723.265/T+3.53068*log(T)-0.00728332*T)/100.
-# T1=T+1.
-# pliq1=0.01*exp(54.842763- 6763.22 / T1-4.21*log(T1) + 0.000367*T1+tanh(0.0415*(T1 - 218.8))*\
-#                 (53.878 -1331.22/T1-9.44523*log(T1) + 0.014025*T1))
-# pice1=exp(9.550426-5723.265/T1+3.53068*log(T1)-0.00728332*T1)/100.
-
-# ws=where(T.ge.273,pliq,pice)
-# ws1=where(T1.ge.273,pliq1,pice1)
-
-# dws=ws/(ws1-ws)
-# return(dws)
-# end
-
 
 ############# SPATIAL PATTERN FUNCTION #############
 def regress_pattern_vectorized(feedback_data, gtas):
@@ -1430,7 +1346,7 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
         print(f"Processing {tip}")  
         try:
             k = kernel.kernel[(tip, 'ts')]
-            # print("Kernel loaded successfully")  
+            print("Kernel loaded successfully")  
         except Exception as e:
             print(f"Error loading kernel for {tip}: {e}")  
             continue  
@@ -1522,7 +1438,7 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
         print(f"Processing {tip}")  
         try:
             k = kernel.kernel[(tip, 't')]
-            # print("Kernel loaded successfully")  
+            print("Kernel loaded successfully")  
         except Exception as e:
             print(f"Error loading kernel for {tip}: {e}")  
             continue  
@@ -1689,6 +1605,9 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
     """
     radiation=dict()
     
+    Rv = 461.5 # gas constant of water vapor
+    Lv = 2.25e+06 # latent heat of water vapor
+    
     if kernel.use_log_wv:
         wv_name='hus_log'
     else:
@@ -1701,22 +1620,18 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
         anoms_hus=experiment.ds_anom[wv_name]
             
     if kernel.name=='HUANG':
-        dln = Kq_fact(control.ds_clim['ta'], method = 'CC')
+        dln = dlnws(control.ds_clim['ta'])
         if 'time' in dln.dims:
             coso = anoms_hus * dln.values
         elif 'month' in dln.dims:
             coso = anoms_hus.groupby('time.month') * dln
     elif kernel.name=='ERA5':
-        dq_norm = (anoms_hus.groupby('time.month') / control.ds_clim['hus'])
-        print(dq_norm.shape)
-        coso = dq_norm.groupby('time.month') * Kq_fact(control.ds_clim['ta'], method = 'CC')
-        # coso = (anoms_hus.groupby('time.month') / control.ds_clim['hus']) * Kq_fact(control.ds_clim['ta'], method = 'linear')
+        coso = (anoms_hus.groupby('time.month') / control.ds_clim['hus']).groupby('time.month') * (control.ds_clim['ta']**2) * Rv / Lv    
     elif kernel.name == "SPECTRAL":
         coso = q_to_ppmv(anoms_hus)
     
 
-    for tip in ['clr','cld']:
-        print(f"Processing {tip}") 
+    for tip in ['clr','cld']: 
         kernel_lw = kernel.kernel[(tip, 'wv_lw')]
         if kernel.name!= 'SPECTRAL':
             kernel_sw = kernel.kernel[(tip, 'wv_sw')]
@@ -1764,7 +1679,6 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
             wv.close()
         
     return radiation
-
 #CLOUD ANOMALY
 def Rad_anomaly_cloud(experiment, control, cart_out):
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
@@ -1772,9 +1686,9 @@ def Rad_anomaly_cloud(experiment, control, cart_out):
     
     crf = experiment.ds_anom['Net0'] - experiment.ds_anom['Net']
 
-    # lat_target = np.linspace(-90, 90, 73)
-    # lon_target = np.linspace(0, 357.5, 144)
-    # crf = ctl.regrid_dataset(crf, lat_target, lon_target)
+    lat_target = np.linspace(-90, 90, 73)
+    lon_target = np.linspace(0, 357.5, 144)
+    crf = ctl.regrid_dataset(crf, lat_target, lon_target)
     crf_glob= ctl.global_mean(crf).groupby('time.year').mean('time')
 
     dRt = open_dRt(cart_out, names=dRt_nocloud)
