@@ -38,6 +38,7 @@ time_coder = xr.coders.CFDatetimeCoder(use_cftime = True)
 STD_VARS = {"hus", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 STD_VARS_LOGQ = {"hus_log", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 STD_VARS_NOALB = {"hus", "rlut", "rsdt", "rlutcs", "rsut", "rsutcs", "ta", "tas", "ts", "rsds", "rsus"}
+STD_VARS_ECE4 = {"hus", "rlut", "rsdt", "rlntcs", "rsut", "rsntcs", "alb", "ta", "tas", "ts"}
 
 
 def regrid(ds, target_ds):
@@ -139,7 +140,7 @@ class Experiment:
         Merged lazy dataset of remapped data populated by `load_remapped`.
     """
  
-    def __init__(self, name, orig_dir, remap_dir = "remapped", raw_variables = STD_VARS_NOALB, time_chunk = 20, variable_mapping = None) -> None:
+    def __init__(self, name, orig_dir, remap_dir = "remapped", raw_variables = STD_VARS_NOALB, time_chunk = 20, variable_mapping = None, file_dict = None) -> None:
         self.name: str = name
         self.raw_variables: set[str] | list[str] | tuple[str] = raw_variables
         
@@ -155,7 +156,11 @@ class Experiment:
         else:
             self.variable_mapping = variable_mapping
 
-        self.load_file_dict()
+        if file_dict is None:
+            self.load_file_dict()
+        else:
+            self.file_dict = file_dict
+
         self.raw_data = dict()
         self.ds = xr.Dataset()
         self.ds_anom = xr.Dataset()
@@ -190,6 +195,26 @@ class Experiment:
     #     self.file_dict = file_dict
 
  
+    # def load_raw(self) -> None:
+    #     """
+    #     Lazily open each file in *file_dict* as an xr.DataArray and store
+    #     them in ``self.raw_data``.
+ 
+    #     Parameters
+    #     ----------
+    #     file_dict : list of path-like
+    #         Paths to NetCDF files.
+    #     """
+    #     print('Loading raw data...')
+
+    #     # self.raw_data = {var: xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
+    #     #     for var in self.raw_variables
+    #     # }
+    #     self.raw_data = {}
+    #     for var in self.raw_variables:
+    #         print(var)
+    #         self.raw_data[var] = xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
+ 
     def load_raw(self) -> None:
         """
         Lazily open each file in *file_dict* as an xr.DataArray and store
@@ -201,15 +226,22 @@ class Experiment:
             Paths to NetCDF files.
         """
         print('Loading raw data...')
-
-        # self.raw_data = {var: xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
-        #     for var in self.raw_variables
-        # }
         self.raw_data = {}
         for var in self.raw_variables:
             print(var)
-            self.raw_data[var] = xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)[self.variable_mapping[var]]
- 
+            ds_tmp = xr.open_mfdataset(self.file_dict[var], combine='by_coords', decode_times=time_coder, chunks = self.chunks, preprocess = preproc)
+            
+            rename_coords = {}
+            if 'time_counter' in ds_tmp.coords or 'time_counter' in ds_tmp.dims:
+                rename_coords['time_counter'] = 'time'
+            if 'pressure_levels' in ds_tmp.coords or 'pressure_levels' in ds_tmp.dims:
+                rename_coords['pressure_levels'] = 'plev'
+                
+            if rename_coords:
+                ds_tmp = ds_tmp.rename(rename_coords)
+
+            self.raw_data[var] = ds_tmp[self.variable_mapping[var]]
+    
     # ------------------------------------------------------------------
     # 2. CDO remapping to a target grid
     # ------------------------------------------------------------------
@@ -388,6 +420,8 @@ class Experiment:
         
         if 'alb' in variables: self.check_albedo()
         if 'hus_log' in variables: self.check_hus_log()
+        if 'rsntcs' in variables: self.ds['rsutcs'] = self.ds['rsdt'] - self.ds['rsntcs']
+        if 'rlntcs' in variables: self.ds['rlutcs'] = - self.ds['rlntcs']
         self.Net_TOA()
 
         for var in variables:
@@ -403,7 +437,18 @@ class Experiment:
         if time_range is not None:
             self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
         
-
+    def check_coords(self):
+        if not self.ds:
+            raise ValueError('Remapped data not loaded (self.ds is empty)')
+        
+        rename_coords = {}
+        if 'time_counter' in self.ds.coords or 'time_counter' in self.ds.dims:
+            rename_coords['time_counter'] = 'time'
+        if 'pressure_levels' in self.ds.coords or 'pressure_levels' in self.ds.dims:
+            rename_coords['pressure_levels'] = 'plev'
+                
+        if rename_coords:
+            self.ds = self.ds.rename(rename_coords)
 
     def compute_clim(self, time_range = None, compute = True):
         """
@@ -862,8 +907,8 @@ def load_config(config_file, variable_mapping_file = None):
     time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
     time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     
-    print(f"Time range for climatology: {time_range_clim if time_range_clim else "all"}")
-    print(f"Time range for experiment: {time_range_exp if time_range_exp else "all"}")
+    print(f"Time range for climatology: {time_range_clim if time_range_clim else 'all'}")
+    print(f"Time range for experiment: {time_range_exp if time_range_exp else 'all'}")
     config['time_range_exp'] = time_range_exp
     config['time_range_clim'] = time_range_clim
 
@@ -880,7 +925,7 @@ def load_config(config_file, variable_mapping_file = None):
     return config
 
 
-def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None):
+def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None, control_file_dict = None, exp_file_dict = None):
     """
     All the preprocessing needed before calling the feedback calculations:
         - Reads experiment, control and kernels;
@@ -904,29 +949,40 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     
     # load picontrol (+ remap)
     print('\n -------> Loading control')
-    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'])
+    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], file_dict = control_file_dict)
 
     if control.check_remapped():
         control.load_remapped()
     else:
         print(f"Remapped data not found in: {control.remap_dir}, computing from raw..")
+        # if control_file_dict is not None:
+        #     control.file_dict = control_file_dict
+        # else:
+        #     control.load_file_dict()
+        #     control.load_raw()
         control.load_raw()
-
         control.remap(target_ds = k, save_remapped = True)
-    
+
+    control.check_coords() 
     control.check_vars(variables = variables)
     control.vertical_interp(k)
 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
-    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'])
+    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], file_dict = exp_file_dict)
     if experiment.check_remapped():
         experiment.load_remapped()
     else:
         print(f"Remapped data not found in: {experiment.remap_dir}, computing from raw..")
+        # if exp_file_dict is not None:
+        #     experiment.file_dict = exp_file_dict
+        # else:
+        #     experiment.load_file_dict()
+        #     experiment.load_raw()
         experiment.load_raw()
         experiment.remap(target_ds = k, save_remapped = True)
 
+    experiment.check_coords() 
     experiment.check_vars(variables = variables)
     experiment.vertical_interp(k)
     experiment.check_time_range(config)
