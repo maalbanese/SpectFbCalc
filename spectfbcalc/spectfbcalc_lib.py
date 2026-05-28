@@ -167,8 +167,15 @@ class Experiment:
     def load_file_dict(self):
         file_dict = {}
         for var in self.raw_variables:
-            pattern = f"{self.variable_mapping[var]}/{self.variable_mapping[var]}*.nc"
-            file_dict[var] = sorted(self.orig_dir.glob(pattern)) # does not work with **/* with symlinks!
+            base_folder = self.orig_dir / self.variable_mapping[var]
+
+            pattern = f"{self.variable_mapping[var]}*.nc"
+            files = sorted(base_folder.glob(pattern))
+        
+            if not files:
+                files = sorted(base_folder.glob(f"**/{pattern}"))
+        
+            file_dict[var] = files
 
         self.file_dict = file_dict
 
