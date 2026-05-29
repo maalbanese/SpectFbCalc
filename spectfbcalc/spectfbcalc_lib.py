@@ -245,7 +245,66 @@ class Experiment:
     # ------------------------------------------------------------------
     # 2. CDO remapping to a target grid
     # ------------------------------------------------------------------
- 
+    def prepare_input_dataset(self, target_grid_ds: xr.Dataset, cdo_method: str = None) -> None:
+        """
+        Orchestrates the data availability. Checks if remapped data exists on disk.
+        If not, processes it using the best tool available (smmregrid/CDO or internal remap).
+        """
+        if self.check_remapped():
+            self.load_remapped()
+            return
+
+        print(f"Remapped data not found in: {self.remap_dir}, computing...")
+        
+        first_var = next(v for v in self.file_dict if self.file_dict[v])
+        with xr.open_dataset(self.file_dict[first_var][0]) as ds_check:
+            is_unstructured = 'cell' in ds_check.dims
+
+        if is_unstructured:
+            if cdo_method is None:
+                cdo_method = "ycon"
+            print(f"Unstructured grid detected, using smmregrid with method: {cdo_method}")
+            self.remap_cdo(target_grid_file=target_grid_ds, method=cdo_method)
+            self.load_remapped()
+        else:
+            self.load_raw()
+            self.remap(target_ds=target_grid_ds, save_remapped=True)
+
+    def _resolve_target_grid(self, target_grid_file) -> str:
+        """
+        Resolves the target grid to a CDO-compatible string or file path.
+        For xr.Dataset/DataArray (e.g. kernel), builds a CDO grid string from lat/lon coords.
+        """
+        import subprocess
+
+        if isinstance(target_grid_file, (xr.Dataset, xr.DataArray)):
+            # Estrai lat/lon dalla DataArray/Dataset del kernel
+            if isinstance(target_grid_file, xr.DataArray):
+                ds = target_grid_file.to_dataset(name=target_grid_file.name or 'data')
+            else:
+                ds = target_grid_file
+
+            if 'lat' in ds.coords and 'lon' in ds.coords:
+                nlat = len(ds.lat)
+                nlon = len(ds.lon)
+                cdo_grid = f"r{nlon}x{nlat}"
+                print(f"Target grid resolved to CDO string: {cdo_grid}")
+                return cdo_grid
+
+            temp_target = self.remap_dir / "temp_target_grid.nc"
+            if not temp_target.exists():
+                ds.to_netcdf(temp_target, format='NETCDF4_CLASSIC')
+                temp_nc3 = self.remap_dir / "temp_target_grid_nc3.nc"
+                subprocess.run(
+                    ["cdo", "-f", "nc", "copy", str(temp_target), str(temp_nc3)],
+                    check=True
+                )
+                temp_target = temp_nc3
+            return str(temp_target)
+
+        else:
+            return str(target_grid_file)
+
     def remap(self, target_ds: xr.Dataset, save_remapped = False) -> None:
         """
         Interpolates to target_ds (the kernel ds).
@@ -271,36 +330,100 @@ class Experiment:
         self.ds = xr.merge([remapped[var] for var in remapped])
 
 
-
     def remap_cdo(
         self,
-        target_grid_file: str | Path,
+        target_grid_file: str | Path | xr.Dataset,
         method: str = "remapbil",
     ) -> None:
         """
-        Interpolate each file in *file_dict* to the grid of *target_grid_file*
-        using CDO Python bindings and write results to ``self.remap_dir``.
- 
+        Interpolate each file in *file_dict* to the grid of *target_grid_file*.
+        Uses CDO for regular grids, and smmregrid for EC-Earth4 unstructured grids.
         Parameters
         ----------
         file_dict : list of path-like
             Source files to be remapped.
-        target_grid_file : path-like
-            NetCDF file whose grid defines the target resolution.
+        target_grid_file : path-like or xr.Dataset
+            NetCDF file or xarray Dataset whose grid defines the target resolution.
         method : str
             CDO remapping operator: ``"remapbil"`` (default), ``"remapcon"``,
             ``"remapnn"``, etc.
         """
-        target_grid_file = str(target_grid_file)
+        from smmregrid import Regridder, cdo_generate_weights
 
-        cdo = Cdo()
-        remap_fn = cdo(method)
- 
+        target_path = self._resolve_target_grid(target_grid_file)
+
+        weights_cache = {}
+
+        def _get_cache_key(filepath: Path) -> str:
+            """removed years from filename to get a cache key for weights"""
+            import re
+            return re.sub(r'\d{4}', 'YYYY', filepath.name)
+
         for var in self.file_dict:
-            for src_file in self.file_dict[var]:
-                dst_file = self.remap_dir / src_file.name
-                remap_fn(target_grid_file, input=src_file, output=dst_file)
+            if not self.file_dict[var]:
+                continue
 
+            dst_file = self.remap_dir / f"{var}_{self.name}_remapped.nc"
+            if dst_file.exists():
+                print(f"File already remapped: {dst_file.name}")
+                continue
+
+            tmp_files = []
+
+            for i, src_file in enumerate(self.file_dict[var]):
+                src_file = Path(src_file)
+                sub_dst = (
+                    self.remap_dir / f"tmp_{i}_{var}_{self.name}.nc"
+                    if len(self.file_dict[var]) > 1
+                    else dst_file
+                )
+
+                cache_key = _get_cache_key(src_file)
+
+                if cache_key not in weights_cache:
+                    print(f"Generating weights ({method}) for grid type: {cache_key}")
+                    ds_ref = xr.open_dataset(src_file)
+                    time_dim = next(
+                        (d for d in ['time_counter', 'time'] if d in ds_ref.dims), None
+                    )
+                    source_grid = ds_ref.isel({time_dim: 0}) if time_dim else ds_ref
+                    for enc_key in list(source_grid.encoding.keys()):
+                        if 'time' in enc_key:
+                            source_grid.encoding.pop(enc_key, None)
+                    weights_cache[cache_key] = cdo_generate_weights(
+                        source_grid, target_grid=target_path, method=method
+                    )
+                    ds_ref.close()
+
+                ds_file = xr.open_dataset(src_file)
+                regridder = Regridder(weights=weights_cache[cache_key])
+                regridded_ds = regridder.regrid(ds_file)
+                var_name = self.variable_mapping.get(var, var)
+                if var_name in regridded_ds.data_vars:
+                    ds_out = regridded_ds[[var_name]]
+                else:
+                    data_vars = list(regridded_ds.data_vars)
+                    raise ValueError(f"Variable {var_name} not found in regridded dataset. Available: {data_vars}")
+
+                try:
+                    ds_out.to_netcdf(sub_dst)
+                except Exception as e:
+                    if sub_dst.exists():
+                        sub_dst.unlink()
+                    raise
+                finally:
+                    ds_file.close()
+                    regridded_ds.close()
+
+                tmp_files.append(sub_dst)
+
+            if len(tmp_files) > 1:
+                print(f"Merging chunks for {var} into {dst_file.name}")
+                ds_chunked = xr.open_mfdataset(tmp_files, combine='by_coords', preprocess=preproc)
+                ds_chunked.to_netcdf(dst_file)
+                ds_chunked.close()
+                for f in tmp_files:
+                    f.unlink()
     
     def vertical_interp(self, target_ds):
         print('check vertical dimension')
@@ -351,20 +474,48 @@ class Experiment:
         Loads surface pressure to compute atmospheric layers.
         Interpolates to kernel grid
         """
-        if pressure_path:  # If pressure data is specified, load it
-            print("Loading surface pressure data...")
-            ps_files = sorted(glob.glob(pressure_path))  # Support for patterns like "*.nc"
-            if not ps_files:
-                raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
-            
-            surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords', decode_times=time_coder)
-        
-        psclim = surf_pressure.groupby('time.month').mean(dim='time')
-        psye = psclim['ps'].mean('month')
-        
-        psye_rg = regrid(psye, target_ds).compute()
+        if not pressure_path:
+            print("No pressure path provided.")
+            return
 
-        self.surf_pressure = psye_rg
+        print("Loading surface pressure data...")
+        ps_files = sorted(glob.glob(pressure_path))
+        if not ps_files:
+            raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
+        
+        surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords', decode_times=time_coder, preprocess=preproc)
+        ps_var_name = 'ps' if 'ps' in surf_pressure.data_vars else list(surf_pressure.data_vars)[0]
+        is_ps_unstructured = 'cell' in surf_pressure.dims
+
+        if is_ps_unstructured:
+            print("Surface pressure unstructured grid detected. Using smmregrid...")
+            from smmregrid import Regridder, cdo_generate_weights
+            
+            time_dim = next((d for d in ['time_counter', 'time'] if d in surf_pressure.dims), None)
+            source_grid = surf_pressure.isel({time_dim: 0}) if time_dim else surf_pressure
+            
+            for enc_key in list(source_grid.encoding.keys()):
+                if 'time' in enc_key:
+                    source_grid.encoding.pop(enc_key, None)
+            
+            target_path = self._resolve_target_grid(target_ds)
+            
+            weights = cdo_generate_weights(source_grid, target_grid=target_path, method="ycon")
+            regridder = Regridder(weights=weights)
+            
+            print("Remapping surface pressure time series...")
+            ps_mapped_ds = regridder.regrid(surf_pressure)
+            ps_mapped = ps_mapped_ds[ps_var_name]
+            
+        else:
+            print("Surface pressure regular grid detected. Using standard regrid...")
+            ps_mapped = regrid(surf_pressure[ps_var_name], target_ds)
+
+        print("Computing climatology on remapped surface pressure...")
+        psclim = ps_mapped.groupby('time.month').mean(dim='time')
+        psye = psclim.mean('month')
+        self.surf_pressure = psye.compute()
+        print("Surface pressure successfully loaded, remapped and averaged.")
     
     def Net_TOA(self):
         print('Creating Net TOA variables')
@@ -418,17 +569,33 @@ class Experiment:
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
         
+        if "rsntcs" in self.ds.data_vars and "rsutcs" not in self.ds.data_vars:
+            print("Computed rsutcs from rsntcs and rsdt")
+            self.ds["rsutcs"] = self.ds["rsdt"] - self.ds["rsntcs"]
+            del self.ds["rsntcs"]
+
+        if "rlntcs" in self.ds.data_vars and "rlutcs" not in self.ds.data_vars:
+            print("Computed rlutcs from rlntcs")
+            self.ds["rlutcs"] = -self.ds["rlntcs"]
+            del self.ds["rlntcs"]
+
         if 'alb' in variables: self.check_albedo()
         if 'hus_log' in variables: self.check_hus_log()
-        if 'rsntcs' in variables: self.ds['rsutcs'] = self.ds['rsdt'] - self.ds['rsntcs']
-        if 'rlntcs' in variables: self.ds['rlutcs'] = - self.ds['rlntcs']
+    
         self.Net_TOA()
 
+        missing_vars = []
         for var in variables:
-            if var in self.ds:
-                print(f"{var} loaded")
+            if var in self.ds.data_vars:
+                print(f"-> {var} loaded")
             else:
-                print(f'missing {var}!')
+                print(f"!!! {var} not found !!!")
+                missing_vars.append(var)
+
+        if missing_vars:
+            raise ValueError(
+                f"Dataset missing variables: {missing_vars}"
+            )
 
         self.variables = variables
     
@@ -951,18 +1118,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     print('\n -------> Loading control')
     control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], file_dict = control_file_dict)
 
-    if control.check_remapped():
-        control.load_remapped()
-    else:
-        print(f"Remapped data not found in: {control.remap_dir}, computing from raw..")
-        # if control_file_dict is not None:
-        #     control.file_dict = control_file_dict
-        # else:
-        #     control.load_file_dict()
-        #     control.load_raw()
-        control.load_raw()
-        control.remap(target_ds = k, save_remapped = True)
-
+    control.prepare_input_dataset(target_grid_ds=k)
     control.check_coords() 
     control.check_vars(variables = variables)
     control.vertical_interp(k)
@@ -970,18 +1126,8 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
     experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], file_dict = exp_file_dict)
-    if experiment.check_remapped():
-        experiment.load_remapped()
-    else:
-        print(f"Remapped data not found in: {experiment.remap_dir}, computing from raw..")
-        # if exp_file_dict is not None:
-        #     experiment.file_dict = exp_file_dict
-        # else:
-        #     experiment.load_file_dict()
-        #     experiment.load_raw()
-        experiment.load_raw()
-        experiment.remap(target_ds = k, save_remapped = True)
-
+    
+    experiment.prepare_input_dataset(target_grid_ds=k)
     experiment.check_coords() 
     experiment.check_vars(variables = variables)
     experiment.vertical_interp(k)
@@ -1078,6 +1224,14 @@ def check_vertical(da):
     return da
 
 def preproc(ds):
+    rename_coords = {}
+    if 'time_counter' in ds.dims or 'time_counter' in ds.coords:
+        rename_coords['time_counter'] = 'time'
+    if 'pressure_levels' in ds.dims or 'pressure_levels' in ds.coords:
+        rename_coords['pressure_levels'] = 'plev'
+    if rename_coords:
+        ds = ds.rename(rename_coords)
+
     ds = ds.assign_coords(lat = ds.lat.round(4))
     #ds = ds.assign_coords(lon = ds.lon.round(4))
     if 'lat_bnds' in ds:
