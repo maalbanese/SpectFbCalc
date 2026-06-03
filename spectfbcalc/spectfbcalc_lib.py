@@ -139,7 +139,7 @@ class Experiment:
         Merged lazy dataset of remapped data populated by `load_remapped`.
     """
  
-    def __init__(self, name, orig_dir, remap_dir = "remapped", raw_variables = STD_VARS_NOALB, time_chunk = 20, variable_mapping = None) -> None:
+    def __init__(self, name, orig_dir, remap_dir = "remapped", raw_variables = STD_VARS_NOALB, time_chunk = 20, variable_mapping = None, chunks_remap = {'time': 120}) -> None:
         self.name: str = name
         self.raw_variables: set[str] | list[str] | tuple[str] = raw_variables
         
@@ -148,7 +148,7 @@ class Experiment:
 
         self.remap_dir.mkdir(parents=True, exist_ok=True)
         self.chunks = {'time': time_chunk}
-        self.chunks_remap = {'time': 120} # this is for remapped data
+        self.chunks_remap = chunks_remap # this is for remapped data
 
         if variable_mapping is None:
             self.variable_mapping = {var: var for var in self.raw_variables}
@@ -573,64 +573,52 @@ def load_spectral_kernel(cart_k: str):
 
     # mapping: filename tag → (output tag, subdirectory)
     tips = {
-        "clear": ("clr", "clearsky_fluxes"),
-        "cloudy":   ("cld", "allsky_fluxes"),
+        "clear": ("clr", "clear_sky_fluxes_use"),
+        "cloudy":   ("cld", "all_sky_fluxes_use"),
     }
 
-    # variable name mapping: nc_name → (out_name, has_lev)
+    # variable name mapping: nc_name → out_name
     vnams = {
-        "temp_jac": ("t", True),
-        "ts_jac":   ("ts", False),
-        "wv_jac":   ("wv_lw", True),
+        "temp_jac": "t",
+        "ts_jac":   "ts",
+        "linear_wv_jac":   "wv_lw_lin",
+        "logaritmic_wv_jac":   "wv_lw_log",
+        "ozo_jac":   "ozo",
+        "co2_jac":   "co2",
+        "ch4_jac":   "ch4",
+        "n2o_jac":   "n2o"
     }
 
     allkers = {}
     vlevs = None
 
+
     for tip_raw, (tip_out, subdir) in tips.items():
-
         sky_dir = os.path.join(cart_k, subdir)
-        ds_months = []
 
-        # --- load monthly files ---
-        for month in range(1, 13):
-            fname = f"spectral_fluxes_kernel_longwave_{month:02d}_{tip_raw}.nc"
+        for name_raw, name_out in vnams.items():
+            fname = f"{name_raw}_spectral_fluxes_kernel_longwave_{tip_raw}.nc"
             fpath = os.path.join(sky_dir, fname)
             if not os.path.exists(fpath):
                 raise FileNotFoundError(f"Missing spectral kernel file: {fpath}")
-            ds = xr.open_dataset(fpath, chunks={"freq":1, 'time':'auto'})
-            # explicitly tag the month (temporary time-like dimension)
-            ds = ds.expand_dims(time=[month])
-            ds_months.append(ds)
+            ds = xr.open_dataset(fpath, chunks={"freq": 10, "lat": 30, "lon": 36})
 
-        # --- concatenate months ---
-        kernels = xr.concat(ds_months, dim="time")
-        if kernels.sizes.get("time", 0) != 12:
-            raise ValueError("Spectral kernel must have exactly 12 months")
-        # convert time → month so downstream groupby('time.month') works
-        kernels = (
-            kernels
-            .assign_coords(month=("time", kernels["time"].values))
-            .swap_dims({"time": "month"})
-            .drop_vars("time")
-        )
+            ds = ds.assign_coords(month=("time", np.array(ds["time"].values).astype(int))).swap_dims({"time": "month"}).drop_vars("time")
 
-        # --- extract kernels ---
-        for vna_local, (vna_out, has_lev) in vnams.items():
-            ker = kernels[vna_local]
-            if has_lev:
-                ker = ker.rename({"lev": "plev"})
-            allkers[(tip_out, vna_out)] = ker
+            if 'lev' in ds.coords:
+                ds = ds.rename({"lev": "plev"})
 
-        # --- pressure levels (once is enough) ---
-        if vlevs is None and "lev" in kernels.coords:
-            vlevs = kernels["lev"].rename({"lev": "plev"})
+            if 'wv' in name_raw:
+                var_name = '_'.join(name_raw.split('_')[1:])
+            else:
+                var_name = name_raw
+            allkers[(tip_out, name_out)] = ds[var_name]
 
-    # --- save outputs ---
-    ds_out = xr.Dataset()
+    # # --- save outputs ---
+    # ds_out = xr.Dataset()
 
-    for (tip, vname), da in allkers.items():
-        ds_out[f"{tip}_{vname}"] = da
+    # for (tip, vname), da in allkers.items():
+    #     ds_out[f"{tip}_{vname}"] = da
     
     return allkers, None # no dp
 
@@ -889,6 +877,11 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     kernel = Kernel(ker, config = config)
     k = kernel.kernel[('clr', 't')]
 
+    if ker == 'SPECTRAL':
+        chunks_remap = {'lat': 30, 'lon': 36, 'time': 120}#, 'plev': 1}
+    else:
+        chunks_remap = {'time': 120}#, 'plev': 1}
+
     if kernel.use_log_wv:
         variables = STD_VARS_LOGQ
     else:
@@ -896,7 +889,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     
     # load picontrol (+ remap)
     print('\n -------> Loading control')
-    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'])
+    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], chunks_remap = chunks_remap)
 
     if control.check_remapped():
         control.load_remapped()
@@ -911,7 +904,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
-    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'])
+    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], chunks_remap = chunks_remap)
     if experiment.check_remapped():
         experiment.load_remapped()
     else:
@@ -1377,6 +1370,32 @@ def q_to_ppmv(q_inp):
     vw_ppmv = q_inp / (1 - q_inp) * (Ma / Mw) * 10**6
     return vw_ppmv
 
+
+def month_calc(anom, k):
+    """
+    Performs the product between anom and k splitting by month instead than using groupby.
+    """
+    month_calc = []
+    for month in np.arange(1, 13):
+        print(f"Processing month {month}...")
+        
+        # Get only this month's data from anom
+        mask = (anom.time.dt.month == month)
+        anom_month = anom.isel(time=mask)
+        
+        # Get this month's data from k
+        k_month = k.sel(month=month)
+        
+        # Multiply without loading everything at once
+        monthly_result = anom_month * k_month
+        month_calc.append(monthly_result)
+
+    # Concatenate month_calc
+    coso = xr.concat(month_calc, dim='time').sortby('time')
+
+    return coso
+
+
 ############ RADIATIVE ANOMALY FUNCTIONS #############
 #PLANCK SURFACE
 
@@ -1426,7 +1445,7 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
     """
     radiation = dict()
     for tip in ['clr', 'cld']:
-        print(f"Processing {tip}")  
+        print(f"Processing {tip}")
         try:
             k = kernel.kernel[(tip, 'ts')]
             # print("Kernel loaded successfully")  
@@ -1434,7 +1453,11 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
             print(f"Error loading kernel for {tip}: {e}")  
             continue  
 
-        dRt = (experiment.ds_anom['ts'].groupby("time.month") * k).groupby("time.year").mean("time")
+        if kernel.name == 'SPECTRAL':
+            dRt = month_calc(experiment.ds_anom['ts'], k)
+            #.groupby("time.year").mean(method="map-reduce", engine="flox")
+        else:
+            dRt = (experiment.ds_anom['ts'].groupby("time.month") * k).groupby("time.year").mean()
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
@@ -1444,6 +1467,8 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
 
         #Then compute and save global mean
         dRt_glob = ctl.global_mean(dRt)
+        # weights = np.cos(np.deg2rad(field[latn]))
+        # glomean = field.weighted(weights).mean([latn, lonn])
         planck = dRt_glob.compute()
         planck.name='planck-surf'
         radiation[(tip, 'planck-surf')] = planck
@@ -1527,11 +1552,11 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
             continue  
 
         if kernel.name=='SPECTRAL':
-            dRt_unif = (anoms_unif.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
-            dRt_lr = (anoms_lr.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
+            dRt_unif = month_calc(anoms_unif, k).sum(dim="plev")
+            dRt_lr = month_calc(anoms_lr, k).sum(dim="plev")
         else:
-            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
-            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
+            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean()
+            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean()
 
 
         #Save full dRt pattern before global averaging
@@ -1716,18 +1741,24 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
 
     for tip in ['clr','cld']:
         print(f"Processing {tip}") 
-        kernel_lw = kernel.kernel[(tip, 'wv_lw')]
-        if kernel.name!= 'SPECTRAL':
+        if kernel.name != 'SPECTRAL':
+            kernel_lw = kernel.kernel[(tip, 'wv_lw')]
             kernel_sw = kernel.kernel[(tip, 'wv_sw')]
+        else:
+            kernel_lw_lin = kernel.kernel[(tip, 'wv_lw_lin')]
+            kernel_lw_log = kernel.kernel[(tip, 'wv_lw_log')]
 
         if kernel.name=='SPECTRAL':
-            dRt_lw = (coso.groupby('time.month')* kernel_lw).sum('plev').groupby('time.year').mean('time')
+            # dRt_lw_lin = (coso.groupby('time.month')* kernel_lw_lin).sum('plev')#.groupby('time.year').mean('time')
+            # dRt_lw_log = (np.log(coso).groupby('time.month')* kernel_lw_log).sum('plev')#.groupby('time.year').mean('time')
+            dRt_lw_lin = month_calc(coso, kernel_lw_lin).sum('plev')
+            coso_log = np.log(coso)#.compute().chunk(coso.chunks)
+            dRt_lw_log = month_calc(coso_log, kernel_lw_log).sum('plev')
+            dRt_lw = dRt_lw_log + dRt_lw_lin
         else:
             dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
             dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
             dRt = dRt_lw + dRt_sw
-                
-                
                 
         #Save full dRt pattern before global averaging
         if save_pattern:
