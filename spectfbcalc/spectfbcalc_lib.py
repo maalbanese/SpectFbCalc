@@ -398,11 +398,25 @@ class Experiment:
 
         self.variables = variables
     
-    def check_time_range(self, config):
-        time_range=config['time_range_exp']
+    def check_time_range(self, config, name):
+        if name =='exp':
+            time_range=config['time_range_exp']
+            print('using time_range_exp')
+        if name == 'clim':
+            time_range=config['time_range_clim']
+            print('using time_range_clim')
         if time_range is not None:
             self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
-        
+
+    def check_spatial_range(self, config):
+        lat_range=config['lat_range']     
+        lon_range=config['lon_range']  
+        if lat_range is not None:
+            print('applying lat range')
+            self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
+        if lon_range is not None:
+            print('applying lon range')
+            self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
 
 
     def compute_clim(self, time_range = None, compute = True):
@@ -854,6 +868,11 @@ def load_config(config_file, variable_mapping_file = None):
     config['time_range_exp'] = time_range_exp
     config['time_range_clim'] = time_range_clim
 
+    lat_range = config.get("lat_range", {})
+    lon_range = config.get("lon_range", {})
+    config['lat_range']=lat_range
+    config['lon_range']=lon_range
+
     # Surface pressure management
     config['pressure_path'] = config['file_paths'].get('pressure_data', None)
 
@@ -903,6 +922,8 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     
     control.check_vars(variables = variables)
     control.vertical_interp(k)
+    control.check_time_range(config, 'clim')
+    control.check_spatial_range(config)
 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
@@ -916,7 +937,8 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
 
     experiment.check_vars(variables = variables)
     experiment.vertical_interp(k)
-    experiment.check_time_range(config)
+    experiment.check_time_range(config, 'exp')
+    experiment.check_spatial_range(config)
 
     # compute climatology and anomaly
     method = config['anomaly_method']
