@@ -125,6 +125,22 @@ class Kernel:
             f")"
         )
 
+    def check_spatial_range_kernel(self, config):
+        lat_range=config['lat_range']     
+        lon_range=config['lon_range']  
+        names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
+        c=['clr','cld']
+        if lat_range is not None:
+            print('applying lat range to kernel')
+            for tip in c:
+                for cat in names:
+                    self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
+        if lon_range is not None:
+            print('applying lon range to kernel')
+            for tip in c:
+                for cat in names:
+                    self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
+
  
 class Experiment:
     """
@@ -902,6 +918,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     # load kernel
     kernel = Kernel(ker, config = config)
     k = kernel.kernel[('clr', 't')]
+    kernel.check_spatial_range_kernel(config)
 
     if kernel.use_log_wv:
         variables = STD_VARS_LOGQ
