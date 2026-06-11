@@ -247,12 +247,11 @@ class Experiment:
         # compute and save
         if save_remapped:
             print("Saving remapped to disk")
-            for var in remapped:
+            for var, ds in remapped.items():
                 print(var)
-                remapped[var] = remapped[var].compute()
-                remapped[var].to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
+                ds.to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
             
-        self.ds = xr.merge([remapped[var] for var in remapped])
+        self.ds = xr.merge(remapped.values())
 
 
 
