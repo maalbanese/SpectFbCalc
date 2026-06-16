@@ -849,8 +849,8 @@ def load_config(config_file, variable_mapping_file = None):
     time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
     time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     
-    print(f"Time range for climatology: {time_range_clim if time_range_clim else "all"}")
-    print(f"Time range for experiment: {time_range_exp if time_range_exp else "all"}")
+    print(f'Time range for climatology: {time_range_clim if time_range_clim else "all"}')
+    print(f'Time range for experiment: {time_range_exp if time_range_exp else "all"}')
     config['time_range_exp'] = time_range_exp
     config['time_range_clim'] = time_range_clim
 
