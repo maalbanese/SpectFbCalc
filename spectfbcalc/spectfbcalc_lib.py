@@ -251,7 +251,7 @@ class Experiment:
                 print(var)
                 ds.to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
             
-        self.ds = xr.merge(remapped.values())
+        self.load_remapped()
 
 
 
@@ -1444,7 +1444,7 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
             print(f"Error loading kernel for {tip}: {e}")  
             continue  
 
-        dRt = (experiment.ds_anom['ts'].groupby("time.month") * k).groupby("time.year").mean("time")
+        dRt = (experiment.ds_anom['ts'].groupby("time.month") * k)
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
@@ -1531,11 +1531,11 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
             continue  
 
         if kernel.name=='SPECTRAL':
-            dRt_unif = (anoms_unif.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
-            dRt_lr = (anoms_lr.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
+            dRt_unif = (anoms_unif.groupby('time.month')*k).sum(dim="plev")
+            dRt_lr = (anoms_lr.groupby('time.month')*k).sum(dim="plev")
         else:
-            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
-            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
+            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev")
+            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev")
 
 
         #Save full dRt pattern before global averaging
@@ -1616,7 +1616,7 @@ def Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern=False):
 
     for tip in [ 'clr','cld']:
         k = kernel.kernel[(tip, 'alb')]
-        dRt = (experiment.ds_anom['alb'].groupby("time.month") * k).groupby("time.year").mean("time")
+        dRt = (experiment.ds_anom['alb'].groupby("time.month") * k)
             
         #Save full dRt pattern before global averaging
         if save_pattern:
@@ -1723,10 +1723,10 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
             kernel_sw = kernel.kernel[(tip, 'wv_sw')]
 
         if kernel.name=='SPECTRAL':
-            dRt_lw = (coso.groupby('time.month')* kernel_lw).sum('plev').groupby('time.year').mean('time')
+            dRt_lw = (coso.groupby('time.month')* kernel_lw).sum('plev')
         else:
-            dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
-            dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
+            dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev')
+            dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev')
             dRt = dRt_lw + dRt_sw
                 
                 
@@ -1818,7 +1818,7 @@ def Rad_anomaly_cloud(experiment, cart_out):
     
     crf = experiment.ds_anom['Net0'] - experiment.ds_anom['Net']
 
-    crf_glob= ctl.global_mean(crf).groupby('time.year').mean('time')
+    crf_glob= ctl.global_mean(crf)
 
     dRt = open_dRt(cart_out, names=dRt_nocloud)
 
@@ -2058,6 +2058,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
+            dRt[(tip, fbn)]=dRt[(tip, fbn)].groupby('time.year').mean('time')
             start_year = int(dRt[(tip, fbn)].year.min())
             feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num * num).mean()
 
@@ -2076,7 +2077,8 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
                 fb_pattern[(tip, fbn)] = (slope, stderr)
                 slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
-    
+
+    dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
     start_year = int(dRt[('cld', 'cloud')].year.min())
     feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num * num).mean()
     fb_coef[('cld', 'cloud')] = stats.linregress(gtas, feedback)
@@ -2184,6 +2186,7 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
+            dRt[(tip, fbn)]=dRt[(tip, fbn)].groupby('time.year').mean('time')
             inter=calc_inter(dRt[(tip, fbn)], running_years)
 
             res = stats.linregress(temp,inter)
@@ -2203,6 +2206,7 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip +  ".nc", format="NETCDF4")
 
     #cloud
+    dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
     inter=calc_inter(dRt[('cld', 'cloud')], running_years)
     res = stats.linregress(temp,inter)
     fb_coef['cld', 'cloud'] = res
@@ -2320,6 +2324,7 @@ def single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_
     if name!='cloud':
         for tip in ['clr', 'cld']:
             feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+".nc",  decode_times=time_coder)
+            feedbacks=feedbacks.groupby('time.year').mean('time')
             start_year = int(feedbacks.year.min())
             feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
 
@@ -2327,6 +2332,7 @@ def single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_
             fb[(tip, name)] = res
     else:
         feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global.nc",  decode_times=time_coder)
+        feedbacks=feedbacks.groupby('time.year').mean('time')
         start_year = int(feedbacks.year.min())
         feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
         fb = stats.linregress(gtas, feedback)
