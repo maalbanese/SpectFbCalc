@@ -10,7 +10,7 @@ SpectFbCalc is a Python-based tool designed for calculating radiative anomalies 
 - **Dask Integration:** Preserves lazy evaluation for handling large model outputs efficiently.
 
 ## Documentation
-For full installation instructions, usage tutorials, theoretical framework, and API reference, please visit our **[ReadTheDocs Documentation](#)**.
+For full installation instructions, usage tutorials, theoretical framework, and API reference, please visit our **[ReadTheDocs Documentation](https://spectfbcalc-malbanese.readthedocs.io/en/latest/)**.
 
 ## Quick Install
 ```bash
