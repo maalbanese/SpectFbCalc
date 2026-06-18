@@ -1,3 +1,6 @@
 ClimTools/
 spectfbcalc/__pycache__/
 spectfbcalc/config.yaml
+.ipynb_checkpoints/
+docs/_build/
+docs/build/
