@@ -1,5 +1,5 @@
 # SpectFbCalc
-[![Documentation Status](https://readthedocs.org/projects/spectfbcalc/badge/?version=latest)](#) *Tools for the calculation of radiative feedbacks and sensitivities, both broad-band and spectrally-resolved.*
+[![Documentation Status](https://readthedocs.org/projects/spectfbcalc-malbanese/badge/?version=latest)](https://spectfbcalc-malbanese.readthedocs.io/en/latest/?badge=latest) *Tools for the calculation of radiative feedbacks and sensitivities, both broad-band and spectrally-resolved.*
 
 SpectFbCalc is a Python-based tool designed for calculating radiative anomalies and climate feedbacks using synthetic kernels and climate model outputs. It facilitates the analysis of radiative biases and climate feedbacks and explores the impact of parameter tuning on climate model performance and sensitivity.
 
