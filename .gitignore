@@ -2,3 +2,7 @@ ClimTools/
 spectfbcalc/__pycache__/
 spectfbcalc/config.yaml
 spectfbcalc/.ipynb_checkpoints/
+slurm*out
+slurm*err
+sp*.out
+sp*.err

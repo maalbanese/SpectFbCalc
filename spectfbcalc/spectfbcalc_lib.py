@@ -38,6 +38,7 @@ time_coder = xr.coders.CFDatetimeCoder(use_cftime = True)
 STD_VARS = {"hus", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 STD_VARS_LOGQ = {"hus_log", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 STD_VARS_NOALB = {"hus", "rlut", "rsdt", "rlutcs", "rsut", "rsutcs", "ta", "tas", "ts", "rsds", "rsus"}
+STD_VARS_SPECT = {"wv_vmr", "wv_vmr_log", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 
 
 def regrid(ds, target_ds):
@@ -58,7 +59,7 @@ class Kernel:
     name : one among "HUANG", "ERA5", "SPECTRAL"
     """
  
-    def __init__(self, name, config = None, path_input = None, filename_template = None) -> None:
+    def __init__(self, name, config = None, path_input = None, filename_template = None, wv_method_spectral = 'hybrid') -> None:
         if name not in ['HUANG', 'ERA5', 'SPECTRAL']:
             raise ValueError(f'kernel name {name} not supported')
             
@@ -75,9 +76,14 @@ class Kernel:
         print(f"Loading kernel: {name}")
         self.kernel, self.dp = load_kernel(self.name, self.cart_k, finam = self.filename_template)
 
-        self.use_log_wv = False
+        self.wv_name = 'hus'
         if self.name in ['HUANG']: # Add here other kernels that need hus_log
-            self.use_log_wv = True
+            self.wv_name = 'hus_log'
+        elif self.name == 'SPECTRAL':
+            self.wv_name = 'wv_vmr'
+        
+        if self.name == 'SPECTRAL':
+            self.wv_method = wv_method_spectral
 
         if self.name in ['HUANG', 'ERA5']:
             self.dp = self.dp/100. # in units of 100 hPa
@@ -368,6 +374,22 @@ class Experiment:
             print('Applying log to hus')
             self.ds['hus_log'] = da.log(self.ds['hus'])
             del self.ds['hus']
+    
+    def convert_hus_to_vmr(self) -> None:
+        """
+        Converts specific humidity to water vapor vmr (in ppm).
+        """
+
+        if not self.ds:
+            raise ValueError('Remapped data not loaded (self.ds is empty)')
+    
+        if 'wv_vmr' in self.ds.data_vars:
+            print('wv_vmr already in ds')
+        else:
+            print('Converting hus to wv vmr')
+            self.ds['wv_vmr'] = q_to_ppmv(self.ds['hus'])
+            self.ds['wv_vmr_log'] = da.log(self.ds['wv_vmr'])
+            del self.ds['hus']
 
 
     def check_vars(self, variables = STD_VARS_LOGQ) -> None:
@@ -380,6 +402,7 @@ class Experiment:
         
         if 'alb' in variables: self.check_albedo()
         if 'hus_log' in variables: self.check_hus_log()
+        if 'wv_vmr' in variables: self.convert_hus_to_vmr()
         self.Net_TOA()
 
         for var in variables:
@@ -581,8 +604,8 @@ def load_spectral_kernel(cart_k: str):
     vnams = {
         "temp_jac": "t",
         "ts_jac":   "ts",
-        "linear_wv_jac":   "wv_lw_lin",
-        "logaritmic_wv_jac":   "wv_lw_log",
+        "all_linear_wv_jac":   "wv_lw_lin",
+        "all_logaritmic_wv_jac":   "wv_lw_log",
         "ozo_jac":   "ozo",
         "co2_jac":   "co2",
         "ch4_jac":   "ch4",
@@ -609,7 +632,7 @@ def load_spectral_kernel(cart_k: str):
                 ds = ds.rename({"lev": "plev"})
 
             if 'wv' in name_raw:
-                var_name = '_'.join(name_raw.split('_')[1:])
+                var_name = '_'.join(name_raw.split('_')[-2:])
             else:
                 var_name = name_raw
             allkers[(tip_out, name_out)] = ds[var_name]
@@ -860,7 +883,7 @@ def load_config(config_file, variable_mapping_file = None):
     return config
 
 
-def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None):
+def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None, wv_method_spectral = 'hybrid'):
     """
     All the preprocessing needed before calling the feedback calculations:
         - Reads experiment, control and kernels;
@@ -874,7 +897,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     config = load_config(config_file, variable_mapping_file = variable_mapping_file)
 
     # load kernel
-    kernel = Kernel(ker, config = config)
+    kernel = Kernel(ker, config = config, wv_method_spectral=wv_method_spectral)
     k = kernel.kernel[('clr', 't')]
 
     if ker == 'SPECTRAL':
@@ -882,7 +905,9 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     else:
         chunks_remap = {'time': 120}#, 'plev': 1}
 
-    if kernel.use_log_wv:
+    if kernel.wv_name == 'wv_vmr':
+        variables = STD_VARS_SPECT
+    elif kernel.wv_name == 'hus_log':
         variables = STD_VARS_LOGQ
     else:
         variables = STD_VARS
@@ -1377,7 +1402,7 @@ def month_calc(anom, k):
     """
     month_calc = []
     for month in np.arange(1, 13):
-        print(f"Processing month {month}...")
+        #print(f"Processing month {month}...")
         
         # Get only this month's data from anom
         mask = (anom.time.dt.month == month)
@@ -1713,16 +1738,16 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
     """
     radiation=dict()
     
-    if kernel.use_log_wv:
-        wv_name='hus_log'
-    else:
-        wv_name='hus'
+    wv_name = kernel.wv_name
+    anoms_hus=experiment.ds_anom[wv_name]
+    if kernel.name == 'SPECTRAL':
+        anoms_hus_log = experiment.ds_anom[wv_name+'_log']
         
     if use_strat_mask==True:
         mask=mask_strato(experiment.ds['ta'])
-        anoms_hus= (experiment.ds_anom[wv_name] * mask).sel(plev = mask.plev)
-    else:
-        anoms_hus=experiment.ds_anom[wv_name]
+        anoms_hus=(anoms_hus * mask).sel(plev = mask.plev)
+        if kernel.name == 'SPECTRAL': 
+            anoms_hus_log = (anoms_hus_log * mask).sel(plev = mask.plev)
             
     if kernel.name=='HUANG':
         dln = Kq_fact(control.ds_clim['ta'], method = 'CC')
@@ -1732,12 +1757,11 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
             coso = anoms_hus.groupby('time.month') * dln
     elif kernel.name=='ERA5':
         dq_norm = (anoms_hus.groupby('time.month') / control.ds_clim['hus'])
-        print(dq_norm.shape)
         coso = dq_norm.groupby('time.month') * Kq_fact(control.ds_clim['ta'], method = 'CC')
         # coso = (anoms_hus.groupby('time.month') / control.ds_clim['hus']) * Kq_fact(control.ds_clim['ta'], method = 'linear')
-    elif kernel.name == "SPECTRAL":
-        coso = q_to_ppmv(anoms_hus)
-    
+    elif kernel.name == 'SPECTRAL':
+        coso = anoms_hus
+        coso_log = anoms_hus_log
 
     for tip in ['clr','cld']:
         print(f"Processing {tip}") 
@@ -1751,10 +1775,12 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
         if kernel.name=='SPECTRAL':
             # dRt_lw_lin = (coso.groupby('time.month')* kernel_lw_lin).sum('plev')#.groupby('time.year').mean('time')
             # dRt_lw_log = (np.log(coso).groupby('time.month')* kernel_lw_log).sum('plev')#.groupby('time.year').mean('time')
-            dRt_lw_lin = month_calc(coso, kernel_lw_lin).sum('plev')
-            coso_log = np.log(coso)#.compute().chunk(coso.chunks)
-            dRt_lw_log = month_calc(coso_log, kernel_lw_log).sum('plev')
-            dRt_lw = dRt_lw_log + dRt_lw_lin
+            if kernel.wv_method in ['linear', 'hybrid']:
+                dRt_lw_lin = month_calc(coso, kernel_lw_lin).sum('plev')
+            if kernel.wv_method in ['log', 'hybrid']:
+                dRt_lw_log = month_calc(coso_log, kernel_lw_log).sum('plev')
+            
+            #dRt_lw = dRt_lw_log + dRt_lw_lin
         else:
             dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
             dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
@@ -1773,25 +1799,48 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
                 dRt_sw.attrs["description"] = f"{tip} water vapor dRt_sw pattern"
                 dRt_sw.to_netcdf(cart_out + "dRt_sw_water-vapor_pattern_" + tip +  ".nc", format="NETCDF4")
 
+        print('Before WV computation')
+
+        if kernel.name=='SPECTRAL':
+            if kernel.wv_method in ['linear', 'hybrid']:
+                dRt_glob_lw_lin = ctl.global_mean(dRt_lw_lin)
+                dRt_glob_lw_lin.load()
+                print(f'Computed lin part: {dRt_glob_lw_lin.min()} - {dRt_glob_lw_lin.max()}')
+
+            if kernel.wv_method in ['log', 'hybrid']:
+                dRt_glob_lw_log = ctl.global_mean(dRt_lw_log)
+                dRt_glob_lw_log.load()
+                print(f'Computed log part: {dRt_glob_lw_log.min()} - {dRt_glob_lw_log.max()}')
+
+            if kernel.wv_method == 'linear':
+                dRt_glob_lw = dRt_glob_lw_lin
+            elif kernel.wv_method == 'log':
+                dRt_glob_lw = dRt_glob_lw_log
+            elif kernel.wv_method == 'hybrid':
+                raise ValueError('Implement frequency threshold!')
+                dRt_glob_lw = dRt_glob_lw_log + dRt_glob_lw_lin
+        else:
+            dRt_glob_lw = ctl.global_mean(dRt_lw)
+            dRt_glob_lw.load()
+            print('Computed')
+
+        dRt_glob_lw.name='water-vapor_lw'
+        dRt_glob_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
+        radiation[(tip, 'water-vapor_lw')] = dRt_glob_lw
         
-        dRt_glob_lw = ctl.global_mean(dRt_lw)
-        wv_lw= dRt_glob_lw.compute()
-        wv_lw.name='water-vapor_lw'
-        wv_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
-        radiation[(tip, 'water-vapor_lw')] = wv_lw
         if kernel.name != 'SPECTRAL':
             dRt_glob_sw = ctl.global_mean(dRt_sw)
-            wv_sw= dRt_glob_sw.compute()
-            wv_sw.name='water-vapor_sw'
-            radiation[(tip, 'water-vapor_sw')] = wv_sw
-            wv_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
+            dRt_glob_sw.load()
+            dRt_glob_sw.name='water-vapor_sw'
+            radiation[(tip, 'water-vapor_sw')] = dRt_glob_sw
+            dRt_glob_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
   
             dRt_glob = ctl.global_mean(dRt)
-            wv= dRt_glob.compute()
-            wv.name='water-vapor'
-            radiation[(tip, 'water-vapor')] = wv
-            wv.to_netcdf(cart_out+ "dRt_water-vapor_global_" + tip + ".nc", format="NETCDF4")
-            wv.close()
+            dRt_glob.load()
+            dRt_glob.name='water-vapor'
+            radiation[(tip, 'water-vapor')] = dRt_glob
+            dRt_glob.to_netcdf(cart_out+ "dRt_water-vapor_global_" + tip + ".nc", format="NETCDF4")
+            dRt_glob.close()
         
     return radiation
 
@@ -1819,7 +1868,9 @@ def Rad_anomaly_cloud(experiment, control, cart_out):
 #ALL RAD_ANOM COMPUTATION
 
 def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, force_recompute=True):
-
+    """
+    Computes radiative anomalies decomposed by physical driver.
+    """
 
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
@@ -1846,20 +1897,25 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
         anom_a = xr.open_dataset(path)
     
     print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
+    if kernel.name != 'SPECTRAL':
+        path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
+    else:
+        path = os.path.join(cart_out, "dRt_lw_water-vapor_global_clr.nc")
     if not os.path.exists(path) or force_recompute:
         anom_wv = Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)
     else:
         print(f'Reading already computed anomaly from {path}')
         anom_wv = xr.open_dataset(path) 
 
-    print('cloud')
-    path = os.path.join(cart_out, "dRt_cloud_global.nc")
-    if not os.path.exists(path) or force_recompute:
-        anom_cloud = Rad_anomaly_cloud(experiment, control, cart_out)
-    else:
-        print(f'Reading already computed anomaly from {path}')
-        anom_cloud = xr.open_dataset(path) 
+    anom_cloud = None
+    if kernel.name != 'SPECTRAL':
+        print('cloud')
+        path = os.path.join(cart_out, "dRt_cloud_global.nc")
+        if not os.path.exists(path) or force_recompute:
+            anom_cloud = Rad_anomaly_cloud(experiment, control, cart_out)
+        else:
+            print(f'Reading already computed anomaly from {path}')
+            anom_cloud = xr.open_dataset(path) 
 
     return anom_ps, anom_pal, anom_a, anom_wv, anom_cloud 
 
@@ -1880,32 +1936,11 @@ def open_dRt(cart_out, names=dRt_all):
 
 
 
-def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num=10):
-   
-    print('planck surf')
-    path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
-    
-    print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
-    
-    print('planck atm')
-    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
-    
-    print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)   
-
-    print('cloud')
-    path = os.path.join(cart_out, "dRt_cloud_global.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_cloud(experiment, control, cart_out)
+def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num_year_fb=10):
+    """
+    Computes regression of radiative anomalies against gtas to derive feedbacks. Data are grouped every num_year_fb years before the regression.
+    """
+    _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
     
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     dRt={}
@@ -1914,10 +1949,9 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
     dRt=open_dRt(cart_out)
 
     #compute gtas
-
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
-    gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
+    gtas = gtas.groupby((gtas.year-start_year) // num_year_fb * num_year_fb).mean()
 
     if save_pattern:
         gtas = gtas.chunk({'year': -1})
@@ -1931,7 +1965,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
             start_year = int(dRt[(tip, fbn)].year.min())
-            feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num * num).mean()
+            feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num_year_fb * num_year_fb).mean()
 
             res = stats.linregress(gtas, feedback)
             fb_coef[(tip, fbn)] = res
@@ -1941,7 +1975,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
                 # Open the dRt pattern
                 feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip +".nc", decode_times=time_coder) 
                 start_year = int(feedbacks_pattern.year.min())
-                feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num * num).mean('year')
+                feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
                 # Perform regression at each grid point
                 slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
@@ -1950,7 +1984,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
     
     start_year = int(dRt[('cld', 'cloud')].year.min())
-    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num * num).mean()
+    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num_year_fb * num_year_fb).mean()
     fb_coef[('cld', 'cloud')] = stats.linregress(gtas, feedback)
     
     return {
@@ -1965,33 +1999,13 @@ def calc_inter(ds, running_years):
     return trend
 
 
-def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, running_years=25):   
-   
-    print('planck surf')
-    path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
-    
-    print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
-    
-    print('planck atm')
-    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
-    
-    print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern) 
+def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, running_years=25):
+    """
+    Computes interannual variability feedback from radiative anomalies.
+    """
 
-    print('cloud')
-    path = os.path.join(cart_out, "dRt_cloud_global.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_cloud(experiment, control, cart_out)
-    
+    _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
+
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     dRt={}
     fb_coef = dict()
@@ -2036,11 +2050,10 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     return {
         "fb_coeffs": fb_coef,
         "fb_pattern": fb_pattern if save_pattern else None,
-    }    
+    }
 
 
 def single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_mask=True, save_pattern=False, num=10):
-    
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
     gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
