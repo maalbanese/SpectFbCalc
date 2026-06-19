@@ -1864,11 +1864,12 @@ def Rad_anomaly_planck_surf(experiment: Experiment, kernel: Kernel, cart_out: st
 
     Saved Files
     -----------
-    - dRt_planck-surf_global_{tip}.nc : 
+    - dRt_planck-surf_global_{tip}.nc
         Global mean of the Planck surface anomaly for each condition (clear/cloudy).
 
     If `save_pattern` is True, also saves:
-    - dRt_planck-surf_pattern_{tip}.nc : 
+
+    - dRt_planck-surf_pattern_{tip}.nc
         Full spatial pattern of the Planck surface anomaly for each condition (clear/cloudy).
     """
     radiation = dict()
@@ -1930,15 +1931,16 @@ def Rad_anomaly_planck_atm_lr(experiment: Experiment, kernel: Kernel, cart_out: 
 
     Saved Files
     -----------
-    - dRt_planck-atmo_global_{tip}.nc : 
+    - dRt_planck-atmo_global_{tip}.nc
         Global mean of the Planck atmospheric anomaly for each condition (clear/cloudy).
-    - dRt_lapse-rate_global_{tip}.nc : 
+    - dRt_lapse-rate_global_{tip}.nc
         Global mean of the lapse-rate anomaly for each condition (clear/cloudy).
 
     If `save_pattern` is True, also saves:
-    - dRt_planck-atmo_pattern_{tip}.nc : 
+
+    - dRt_planck-atmo_pattern_{tip}.nc
         Full spatial pattern of the Planck atmospheric anomaly for each condition (clear/cloudy).
-    - dRt_lapse-rate_pattern_{tip}.nc : 
+    - dRt_lapse-rate_pattern_{tip}.nc
         Full spatial pattern of the lapse-rate anomaly for each condition (clear/cloudy).
     """
     radiation=dict()
@@ -2020,11 +2022,12 @@ def Rad_anomaly_albedo(experiment: Experiment, kernel: Kernel, cart_out: str, sa
 
     Saved Files
     -----------
-    - dRt_albedo_global_{tip}.nc : 
+    - dRt_albedo_global_{tip}.nc
         Global mean of the albedo anomaly for each condition (clear/cloudy).
 
     If `save_pattern` is True, also saves:
-    - dRt_albedo_pattern_{tip}.nc : 
+
+    - dRt_albedo_pattern_{tip}.nc
         Full spatial pattern of the albedo anomaly for each condition (clear/cloudy).
     """
     
@@ -2085,11 +2088,12 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
     
     Saved Files
     -----------
-    - dRt_water-vapor_global_{tip}.nc : 
+    - dRt_water-vapor_global_{tip}.nc
         Global mean of the water vapor anomaly for each condition (clear/cloudy).
 
     If `save_pattern` is True, also saves:
-    - dRt_water-vapor_pattern_{tip}.nc : 
+    
+    - dRt_water-vapor_pattern_{tip}.nc
         Full spatial pattern of the water vapor anomaly for each condition (clear/cloudy).
     """
     radiation=dict()
