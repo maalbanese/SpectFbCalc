@@ -604,8 +604,8 @@ def load_spectral_kernel(cart_k: str):
     vnams = {
         "temp_jac": "t",
         "ts_jac":   "ts",
-        "all_linear_wv_jac":   "wv_lw_lin",
-        "all_logaritmic_wv_jac":   "wv_lw_log",
+        "linear_wv_jac":   "wv_lw_lin",
+        "logaritmic_wv_jac":   "wv_lw_log",
         "ozo_jac":   "ozo",
         "co2_jac":   "co2",
         "ch4_jac":   "ch4",
@@ -635,7 +635,7 @@ def load_spectral_kernel(cart_k: str):
                 var_name = '_'.join(name_raw.split('_')[-2:])
             else:
                 var_name = name_raw
-            allkers[(tip_out, name_out)] = ds[var_name]
+            allkers[(tip_out, name_out)] = ds[var_name]/(-1000.) # Convert to W/m2/cm-1 and incoming energy
 
     # # --- save outputs ---
     # ds_out = xr.Dataset()
@@ -1007,7 +1007,6 @@ def load_variable_mapping(configvar_file, dataset_type):
     with open(configvar_file, 'r') as file:
         config = yaml.safe_load(file)
     return config.get(dataset_type, {})
-
 
 
 def check_time_axis(ds, piok):
@@ -1802,23 +1801,30 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
         print('Before WV computation')
 
         if kernel.name=='SPECTRAL':
-            if kernel.wv_method in ['linear', 'hybrid']:
+            if kernel.wv_method == 'linear':
                 dRt_glob_lw_lin = ctl.global_mean(dRt_lw_lin)
                 dRt_glob_lw_lin.load()
                 print(f'Computed lin part: {dRt_glob_lw_lin.min()} - {dRt_glob_lw_lin.max()}')
-
-            if kernel.wv_method in ['log', 'hybrid']:
+            elif kernel.wv_method == 'log':
                 dRt_glob_lw_log = ctl.global_mean(dRt_lw_log)
                 dRt_glob_lw_log.load()
                 print(f'Computed log part: {dRt_glob_lw_log.min()} - {dRt_glob_lw_log.max()}')
+            elif kernel.wv_method == 'hybrid':
+                dRt_glob_lw_lin = ctl.global_mean(dRt_lw_lin.sel(freq = slice(651., None)))
+                dRt_glob_lw_lin.load()
+                print(f'Computed lin part: {dRt_glob_lw_lin.min()} - {dRt_glob_lw_lin.max()}')
+                dRt_glob_lw_log = ctl.global_mean(dRt_lw_log.sel(freq = slice(0, 650.)))
+                dRt_glob_lw_log.load()
+                print(f'Computed log part: {dRt_glob_lw_log.min()} - {dRt_glob_lw_log.max()}')
+            else:
+                raise ValueError(f'Kernel wv method {kernel.wv_method} not recognized. Use one among: linear, log, hybrid')
 
             if kernel.wv_method == 'linear':
                 dRt_glob_lw = dRt_glob_lw_lin
             elif kernel.wv_method == 'log':
                 dRt_glob_lw = dRt_glob_lw_log
-            elif kernel.wv_method == 'hybrid':
-                raise ValueError('Implement frequency threshold!')
-                dRt_glob_lw = dRt_glob_lw_log + dRt_glob_lw_lin
+            else:
+                dRt_glob_lw = xr.concat([dRt_glob_lw_log, dRt_glob_lw_lin], dim = 'freq')
         else:
             dRt_glob_lw = ctl.global_mean(dRt_lw)
             dRt_glob_lw.load()
