@@ -1,0 +1,32 @@
+dataset_type: #specify model version: ece3 or ece4
+kernels:
+    ERA5:
+      path_input: "/perm/ccff/radiative_kernels/Huang_ERA5/"
+      filename_template: "ERA5_kernel_{}_TOA.nc"
+    HUANG:
+      path_input: "/perm/ccff/radiative_kernels/Huang/toa/"
+      filename_template: "RRTMG_{}_toa_{}_highR.nc"
+    SPECTRAL:
+      path_input: "/ec/res4/scratch/itsf/kernel/"
+      filename_template: "spectral_{}_kernel_longwave_{}.nc"
+
+file_paths:
+   reference_dataset: "/ec/res4/scratch/ccff/tunecs/picontrol_cmip6_r1_ok/"
+   experiment_dataset:  "/ec/res4/scratch/ccff/tunecs/abrupt_cmip6_r8/"
+   pressure_data: "/perm/ccff/radiative_kernels/ps_ece3/ps_Amon_EC-Earth3_stabilization-hist-1990_r1i1p1f1_gr_199?01-199?12.nc"  #to specify if you have ps values in a different file and not in an array
+   output: "/perm/ecme5989/new_func_prove/"
+
+exp_name: "model_1"
+
+anomaly_method: "climatology" #specify the anomaly method: climatology, running_mean
+use_atm_mask: True
+save_pattern: False
+num_year_regr: 1 #number of years to group for regression
+num_running_years_trend: 25 #number of years to group for running trend
+time_range_clim: #this is the time range for the reference dataset 
+   start: '2540-01-16 12:00:00'
+   end: '2689-12-16 12:00:00'
+time_range_exp: #this is the time range for the experiment dataset, give it empty if you want to use the same as the reference dataset
+   start:  "1850-01-16 12:00:00"
+   end: "1999-12-16 12:00:00"
+time_chunk: 12
