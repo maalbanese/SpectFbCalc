@@ -10,13 +10,13 @@ remapping, computation of climatologies and anomalies, and linear regression
 analysis for feedback quantification.
 
 Supported Radiative Kernels:
-    * HUANG (Huang et al., 2017)
-    * ERA5 (Huang and Huang, 2023)
+    * HUANG (Huang et Huang, 2023)
+    * ERA5 (Soden et al., 2008)
     * SPECTRAL
 
 Dependencies:
     * xarray, dask, numpy, scipy, pandas
-    * cdo, smmregrid
+    * cdo, smmregrid, climtools
 """
 
 ##### Package imports
@@ -297,6 +297,11 @@ class Experiment:
         """
         Lazily open each file in *file_dict* as an xr.DataArray and store
         them in ``self.raw_data``.
+        
+        Parameters
+        ----------
+        file_dict : list of path-like
+            Paths to NetCDF files.
         """
         print('Loading raw data...')
         self.raw_data = {}
@@ -620,7 +625,8 @@ class Experiment:
     
     def check_albedo(self) -> None:
         """
-        Checks if the albedo is loaded. If not, tries to compute it from rsus and rsds. If neither is available, raises an error.
+        Checks if the albedo is loaded. If not, tries to compute it from rsus and rsds. 
+        If neither is available, raises an error.
         """
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
@@ -641,7 +647,8 @@ class Experiment:
 
     def check_hus_log(self) -> None:
         """
-        Checks if hus_log is in ds. If not, applies log to hus and adds it to the dataset, removing the original hus. Raises an error if hus is not available.
+        Checks if hus_log is in ds. If not, applies log to hus and adds it to the dataset, 
+        removing the original hus. Raises an error if hus is not available.
         """
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
@@ -656,7 +663,9 @@ class Experiment:
 
     def check_vars(self, variables: set[str] | list[str] | tuple[str] = STD_VARS_LOGQ) -> None:
         """
-        Checks if all variables needed are loaded. If some are missing, tries to compute them from available variables (e.g., rsutcs from rsntcs and rsdt, or rlutcs from rlntcs). If some variables are still missing after the computations, raises an error.
+        Checks if all variables needed are loaded. If some are missing, 
+        tries to compute them from available variables (e.g., rsutcs from rsntcs and rsdt, or rlutcs from rlntcs). 
+        If some variables are still missing after the computations, raises an error.
 
         Parameters
         ----------
@@ -703,7 +712,8 @@ class Experiment:
         Parameters
         ----------
         config
-            Configuration dictionary loaded from the YAML file, expected to contain a 'time_range_exp' key with 'start' and 'end' subkeys specifying the time slice to select.
+            Configuration dictionary loaded from the YAML file, 
+            expected to contain a 'time_range_exp' key with 'start' and 'end' subkeys specifying the time slice to select.
         """
         time_range=config.get('time_range_exp')
         if time_range is not None:
@@ -770,7 +780,8 @@ class Experiment:
         Parameters
         ----------
         control
-            An instance of the Experiment class representing the control run, which must have its climatology already computed and stored in `control.ds_clim`.
+            An instance of the Experiment class representing the control run, 
+            which must have its climatology already computed and stored in `control.ds_clim`.
         """
         from importlib.util import find_spec
     
@@ -785,7 +796,8 @@ class Experiment:
 
     def compute_anom_aligned(self, control: Experiment) -> None:
         """
-        Removes climatology from a control run, aligning the time axis (experiment and climatology need to have the same length!).
+        Removes climatology from a control run, aligning the time axis 
+        (experiment and climatology need to have the same length!).
 
         Parameters
         ----------
@@ -1041,6 +1053,12 @@ def load_kernel_ERA5(cart_k: str, finam: str) -> tuple[dict[tuple[str, str], xr.
         A dictionary containing the preprocessed kernels. Keys are tuples `(tip, variable)`.
     dp
         The pressure levels difference (`dp`).
+
+    Notes
+    -----
+    - The NetCDF kernel files must be organized as `ERA5_kernel_{variable}_TOA.nc` and contain 
+      the fields `TOA_clr` and `TOA_all` for clear-sky and all-sky conditions, respectively.
+    - This function uses the Xarray library to handle datasets and Pickle to save processed data.
     """
     vnams = ['ta_dp', 'ts', 'wv_lw_dp', 'wv_sw_dp', 'alb']
     tips = ['clr', 'cld']
@@ -1843,6 +1861,15 @@ def Rad_anomaly_planck_surf(experiment: Experiment, kernel: Kernel, cart_out: st
         Dictionary containing computed Planck surface radiation anomalies:
         - ('clr', 'planck-surf') : clear-sky Planck surface anomaly
         - ('cld', 'planck-surf') : all-sky Planck surface anomaly
+
+    Saved Files
+    -----------
+    - dRt_planck-surf_global_{tip}.nc : 
+        Global mean of the Planck surface anomaly for each condition (clear/cloudy).
+
+    If `save_pattern` is True, also saves:
+    - dRt_planck-surf_pattern_{tip}.nc : 
+        Full spatial pattern of the Planck surface anomaly for each condition (clear/cloudy).
     """
     radiation = dict()
     for tip in ['clr', 'cld']:
@@ -1886,6 +1913,9 @@ def Rad_anomaly_planck_atm_lr(experiment: Experiment, kernel: Kernel, cart_out: 
         Instance of the Kernel class containing the loaded radiative kernels.
     cart_out
         Output directory where results will be saved.
+    use_strat_mask
+        If True, apply a stratospheric mask to the temperature anomalies 
+        to exclude stratospheric levels from the analysis.
     save_pattern
         If True, save the full spatial anomaly patterns in addition to global means.
 
@@ -1897,6 +1927,19 @@ def Rad_anomaly_planck_atm_lr(experiment: Experiment, kernel: Kernel, cart_out: 
         - ('cld', 'planck-atmo') : all-sky Planck atmospheric anomaly
         - ('clr', 'lapse-rate') : clear-sky lapse-rate anomaly
         - ('cld', 'lapse-rate') : all-sky lapse-rate anomaly
+
+    Saved Files
+    -----------
+    - dRt_planck-atmo_global_{tip}.nc : 
+        Global mean of the Planck atmospheric anomaly for each condition (clear/cloudy).
+    - dRt_lapse-rate_global_{tip}.nc : 
+        Global mean of the lapse-rate anomaly for each condition (clear/cloudy).
+
+    If `save_pattern` is True, also saves:
+    - dRt_planck-atmo_pattern_{tip}.nc : 
+        Full spatial pattern of the Planck atmospheric anomaly for each condition (clear/cloudy).
+    - dRt_lapse-rate_pattern_{tip}.nc : 
+        Full spatial pattern of the lapse-rate anomaly for each condition (clear/cloudy).
     """
     radiation=dict()
     if use_strat_mask==True:
@@ -1974,6 +2017,15 @@ def Rad_anomaly_albedo(experiment: Experiment, kernel: Kernel, cart_out: str, sa
         Dictionary containing computed albedo radiation anomalies:
         - ('clr', 'albedo') : clear-sky albedo anomaly
         - ('cld', 'albedo') : all-sky albedo anomaly
+
+    Saved Files
+    -----------
+    - dRt_albedo_global_{tip}.nc : 
+        Global mean of the albedo anomaly for each condition (clear/cloudy).
+
+    If `save_pattern` is True, also saves:
+    - dRt_albedo_pattern_{tip}.nc : 
+        Full spatial pattern of the albedo anomaly for each condition (clear/cloudy).
     """
     
     radiation=dict()
@@ -2010,23 +2062,35 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
 
     Parameters
     ----------
-    experiment : Experiment
+    experiment
         Instance of the Experiment class containing the model datasets and anomalies.
-    control : Experiment
+    control
         Instance of the Experiment class containing the control datasets.
     kernel : Kernel
         Instance of the Kernel class containing the loaded radiative kernels.
-    cart_out : str
+    cart_out
         Output directory where results will be saved.
-    save_pattern : bool, default False
+    use_strat_mask
+        If True, apply a stratospheric mask to the water vapor anomalies 
+        to exclude stratospheric levels from the analysis.
+    save_pattern
         If True, save the full spatial anomaly patterns in addition to global means.
 
     Returns
     -------
-    radiation : dict
+    radiation
         Dictionary containing computed water vapor radiation anomalies:
         - ('clr', 'water-vapor') : clear-sky water vapor anomaly
         - ('cld', 'water-vapor') : all-sky water vapor anomaly
+    
+    Saved Files
+    -----------
+    - dRt_water-vapor_global_{tip}.nc : 
+        Global mean of the water vapor anomaly for each condition (clear/cloudy).
+
+    If `save_pattern` is True, also saves:
+    - dRt_water-vapor_pattern_{tip}.nc : 
+        Full spatial pattern of the water vapor anomaly for each condition (clear/cloudy).
     """
     radiation=dict()
     
@@ -2104,9 +2168,47 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
 
 #CLOUD ANOMALY
 
-def Rad_anomaly_cloud(experiment: Experiment, control: Experiment, cart_out: str) -> xr.DataArray:
+def Rad_anomaly_cloud(experiment: Experiment, cart_out: str) -> xr.DataArray:
     """
-    Computes cloud radiation anomaly.
+    Computes cloud radiative forcing (cloud feedback) anomalies using model output 
+    and previously computed radiative anomalies for other feedbacks.
+
+    Parameters
+    ----------
+    experiment
+        Instance of the Experiment class containing radiative flux anomalies.
+    cart_out
+        Output directory where results will be saved.
+
+    Returns
+    -------
+    cloud
+        DataArray containing the global mean cloud radiative forcing anomaly.
+
+    Notes
+    -----
+    The cloud radiative anomaly is computed as:
+
+    .. math::
+
+        CRF = Net_0 - Net
+
+    and then combined with kernel-derived non-cloud contributions:
+
+    .. math::
+
+        dR_{cloud} = -CRF + \\sum (dR_{clr,f} - dR_{cld,f})
+
+    where ``f`` represents the non-cloud feedback components (e.g. Planck,
+    lapse-rate, water vapor, albedo, etc.).
+
+    The final result represents the residual cloud contribution needed to close
+    the top-of-atmosphere radiative budget.
+
+     Saved Outputs
+    -------------
+    - dRt_cloud_global.nc
+      Global mean of the cloud radiative forcing anomaly.
     """
     dRt_nocloud = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     dRt={}
@@ -2126,7 +2228,45 @@ def Rad_anomaly_cloud(experiment: Experiment, control: Experiment, cart_out: str
 
 def calc_anoms(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, force_recompute: bool = True) -> tuple[dict, dict, dict, dict, dict | xr.DataArray]:
     """
-    Orchestrates the calculation or loading of all radiative anomalies.
+    Compute or load all radiative kernel-based anomaly components.
+
+    This function orchestrates the computation of all major radiative feedback
+    components (Planck surface, Planck atmosphere + lapse-rate, albedo, water vapor,
+    and cloud) using radiative kernels. It supports caching: previously computed
+    results can be read from disk unless recomputation is forced.
+
+    Parameters
+    ----------
+    experiment
+        Instance of the Experiment class containing the model datasets and anomalies.
+    control
+        Instance of the Experiment class containing the control datasets.
+    kernel
+        Instance of the Kernel class containing the loaded radiative kernels.
+    cart_out
+        Output directory where results and intermediate files will be saved.
+    use_strat_mask
+        If True, masks stratospheric temperature changes when computing atmospheric feedbacks.
+    save_pattern
+        If True, computes and saves the full spatial feedback patterns for each component.
+    force_recompute
+        If True, forces the recomputation of all anomalies even if cached files exist.
+    
+    Returns
+    -------
+    tuple
+        A tuple containing dictionaries of computed anomalies for each feedback component:
+        - anom_ps: Planck surface anomalies (clear and cloudy)
+        - anom_pal: Planck atmosphere and lapse-rate anomalies (clear and cloudy)
+        - anom_a: Albedo anomalies (clear and cloudy)
+        - anom_wv: Water vapor anomalies (clear and cloudy)
+        - anom_cloud: Cloud anomalies (global mean)
+
+    Notes
+    -----
+    This function acts as a pipeline wrapper that ensures consistency across all
+    radiative feedback components. Each component is computed only if missing or
+    if ``force_recompute=True``.
     """
     def load_dict_anomaly(name: str) -> dict[tuple[str, str], xr.DataArray]:
         out = {}
@@ -2196,7 +2336,8 @@ def open_dRt(cart_out: str, names: list[str] = dRt_all) -> dict[tuple[str, str],
 
 def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, num: int = 10) -> dict[str, Any]:
     """
-    Calculates the climate feedback parameters using linear regression over decadal (or custom) chunks.
+    Compute full radiative feedback decomposition and interannual regression
+    against global mean surface temperature.
 
     Parameters
     ----------
@@ -2325,8 +2466,9 @@ def calc_inter(ds: xr.DataArray, running_years: int) -> xr.DataArray:
 
 def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, running_years: int = 25) -> dict[str, Any]:    
     """
-    Calculates climate feedback parameters based on interannual variability, 
-    removing the long-term trend via a running mean.
+    Compute interannual radiative feedback coefficients using kernel-based anomalies
+    and global temperature variability.
+    If required anomaly components are missing, they are computed automatically.
 
     Parameters
     ----------
@@ -2431,7 +2573,10 @@ def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Ker
 
 def single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out: str, control: Experiment = None, use_strat_mask: bool = True, save_pattern: bool = False, num: int = 10) -> dict[str, Any]:
     """
-    Computes and extracts the linear regression feedback for a single specific variable.
+    Computes and extracts the linear regression feedback for a single specific variable. 
+    This function extracts or computes a radiative feedback component,
+    aggregates it into multi-year bins, and estimates its sensitivity to global
+    mean surface temperature via linear regression.
 
     Parameters
     ----------
@@ -2456,6 +2601,25 @@ def single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out:
     -------
     fb
         A dictionary mapping the `(sky_condition, feedback_name)` to SciPy linear regression results.
+    
+    Notes
+    -----
+    The function performs the following steps:
+
+    1. Computes or loads the requested radiative anomaly field.
+    2. Aggregates both temperature and feedback into multi-year bins.
+    3. Performs linear regression:
+
+    .. math::
+
+        \\lambda = \\frac{dR}{dT}
+
+    where:
+    - ``dR`` is the radiative anomaly
+    - ``dT`` is global mean surface temperature anomaly
+
+    Cloud feedback is treated separately because it does not follow the same
+    clear-sky / all-sky decomposition structure as other components.
     """
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
