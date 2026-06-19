@@ -2205,7 +2205,7 @@ def Rad_anomaly_cloud(experiment: Experiment, cart_out: str) -> xr.DataArray:
     The final result represents the residual cloud contribution needed to close
     the top-of-atmosphere radiative budget.
 
-     Saved Outputs
+    Saved Outputs
     -------------
     - dRt_cloud_global.nc
       Global mean of the cloud radiative forcing anomaly.
@@ -2615,8 +2615,8 @@ def single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out:
         \\lambda = \\frac{dR}{dT}
 
     where:
-    - ``dR`` is the radiative anomaly
-    - ``dT`` is global mean surface temperature anomaly
+        - ``dR`` is the radiative anomaly
+        - ``dT`` is global mean surface temperature anomaly
 
     Cloud feedback is treated separately because it does not follow the same
     clear-sky / all-sky decomposition structure as other components.
