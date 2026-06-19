@@ -22,6 +22,7 @@ extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',     # To create summary tables for modules/classes/functions/methods
     'sphinx.ext.napoleon',        # From docstrings in Google style
+    'sphinx.ext.intersphinx',
     'sphinx.ext.viewcode',        # Link at source code of documented Python objects
     'myst_parser',                # To use markdown files as source for documentation
     'sphinx_autodoc_typehints'    # To handle type hints in the documentation
@@ -41,9 +42,17 @@ napoleon_include_init_with_doc = True
 napoleon_use_param = True
 napoleon_use_rtype = True
 
+napoleon_custom_sections = [('Saved Files', 'rubric')]
+
 # -- Typehints configuration ------------------------------------------------------
 typehints_document_rtype = True
 typehints_use_signature_return = True
+
+# -- Intersphinx configuration ------------------------------------------------------
+intersphinx_mapping = {
+    'python': ('https://docs.python.org/3', None),
+    'xarray': ('https://docs.xarray.dev/en/stable/', None),
+}
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
@@ -53,12 +62,8 @@ html_static_path = ['_static']
 
 # -- Options per importazioni fittizie (Mock Imports) -----------------------
 autodoc_mock_imports = [
-    'xarray', 
-    'dask', 
-    'numpy', 
-    'pandas', 
+    'dask',  
     'scipy', 
-    'matplotlib', 
     'climtools', 
     'cdo', 
     'psutil', 
