@@ -50,3 +50,17 @@ typehints_use_signature_return = True
 
 html_theme = 'sphinx_rtd_theme'
 html_static_path = ['_static']
+
+# -- Options per importazioni fittizie (Mock Imports) -----------------------
+autodoc_mock_imports = [
+    'xarray', 
+    'dask', 
+    'numpy', 
+    'pandas', 
+    'scipy', 
+    'matplotlib', 
+    'climtools', 
+    'cdo', 
+    'psutil', 
+    'yaml'
+]
