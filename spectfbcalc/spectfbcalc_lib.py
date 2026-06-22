@@ -27,7 +27,8 @@ from difflib import get_close_matches
 import dask
 import psutil
 from xarray import unify_chunks
- 
+from types import SimpleNamespace
+
 from pathlib import Path
 from cdo import Cdo
 
@@ -131,6 +132,25 @@ class Kernel:
             f"  available kernels = {self.kernel.keys()}\n"
             f")"
         )
+
+    def check_spatial_range(self, config):
+        lat_range=config['lat_range']     
+        lon_range=config['lon_range']  
+        names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
+        c=['clr','cld']
+        print('Lat range to apply:')
+        print(lat_range)
+        for tip in c:
+            for cat in names:
+                self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
+        print('Lon range to apply')
+        print(lon_range)
+        for tip in c:
+            for cat in names:
+                if lon_range['start'] > lon_range['end']:
+                    self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
+                else:
+                    self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
 
  
 class Experiment:
@@ -326,10 +346,9 @@ class Experiment:
         # compute and save
         if save_remapped:
             print("Saving remapped to disk")
-            for var in remapped:
+            for var, ds in remapped.items():
                 print(var)
-                remapped[var] = remapped[var].compute()
-                remapped[var].to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
+                ds.to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
             
         self.ds = xr.merge([remapped[var] for var in remapped])
 
@@ -619,11 +638,29 @@ class Experiment:
 
         self.variables = variables
     
-    def check_time_range(self, config):
-        time_range=config['time_range_exp']
+    def check_time_range(self, config, name):
+        if name =='exp':
+            time_range=config['time_range_exp']
+            print('using time_range_exp')
+        if name == 'clim':
+            time_range=config['time_range_clim']
+            print('using time_range_clim')
         if time_range is not None:
             self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
-        
+
+    def check_spatial_range(self, config):
+        lat_range=config['lat_range']     
+        lon_range=config['lon_range']  
+        print('Lat range to apply:')
+        print(lat_range)
+        self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
+        print('Lon range to apply:')
+        print(lon_range)
+        if lon_range['start'] > lon_range['end']:
+            self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
+        else:
+            self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
+
     def check_coords(self):
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
@@ -1074,6 +1111,11 @@ def load_config(config_file, variable_mapping_file = None):
     config['time_range_exp'] = time_range_exp
     config['time_range_clim'] = time_range_clim
 
+    lat_range = config.get("lat_range", {})
+    lon_range = config.get("lon_range", {})
+    config['lat_range']=lat_range
+    config['lon_range']=lon_range
+
     # Surface pressure management
     config['pressure_path'] = config['file_paths'].get('pressure_data', None)
 
@@ -1103,6 +1145,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     # load kernel
     kernel = Kernel(ker, config = config, wv_method_spectral=wv_method_spectral)
     k = kernel.kernel[('clr', 't')]
+    kernel.check_spatial_range(config)
 
     if ker == 'SPECTRAL':
         chunks_remap = {'lat': 30, 'lon': 36, 'time': 120}#, 'plev': 1}
@@ -1124,6 +1167,8 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     control.check_coords() 
     control.check_vars(variables = variables)
     control.vertical_interp(k)
+    control.check_time_range(config, 'clim')
+    control.check_spatial_range(config)
 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
@@ -1133,7 +1178,8 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     experiment.check_coords() 
     experiment.check_vars(variables = variables)
     experiment.vertical_interp(k)
-    experiment.check_time_range(config)
+    experiment.check_time_range(config, 'exp')
+    experiment.check_spatial_range(config)
 
     # compute climatology and anomaly
     method = config['anomaly_method']
@@ -1660,7 +1706,7 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
             dRt = month_calc(experiment.ds_anom['ts'], k)
             #.groupby("time.year").mean(method="map-reduce", engine="flox")
         else:
-            dRt = (experiment.ds_anom['ts'].groupby("time.month") * k).groupby("time.year").mean()
+            dRt = (experiment.ds_anom['ts'].groupby("time.month") * k)
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
@@ -1752,8 +1798,8 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
             dRt_unif = month_calc(anoms_unif, k).sum(dim="plev")
             dRt_lr = month_calc(anoms_lr, k).sum(dim="plev")
         else:
-            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean()
-            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean()
+            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev")
+            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev")
 
 
         #Save full dRt pattern before global averaging
@@ -1834,7 +1880,7 @@ def Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern=False):
 
     for tip in [ 'clr','cld']:
         k = kernel.kernel[(tip, 'alb')]
-        dRt = (experiment.ds_anom['alb'].groupby("time.month") * k).groupby("time.year").mean("time")
+        dRt = (experiment.ds_anom['alb'].groupby("time.month") * k)
             
         #Save full dRt pattern before global averaging
         if save_pattern:
@@ -1953,8 +1999,8 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
             
             #dRt_lw = dRt_lw_log + dRt_lw_lin
         else:
-            dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
-            dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
+            dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev')
+            dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev')
             dRt = dRt_lw + dRt_sw
                 
         #Save full dRt pattern before global averaging
@@ -2074,7 +2120,7 @@ def Rad_anomaly_cloud(experiment, cart_out):
     
     crf = experiment.ds_anom['net_toa_cs'] - experiment.ds_anom['net_toa']
 
-    crf_glob= ctl.global_mean(crf).groupby('time.year').mean('time')
+    crf_glob= ctl.global_mean(crf)
 
     dRt = open_dRt(cart_out, names=dRt_nocloud)
 
@@ -2296,11 +2342,27 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
+            dRt[(tip, fbn)]=dRt[(tip, fbn)].groupby('time.year').mean('time')
             start_year = int(dRt[(tip, fbn)].year.min())
             feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num_year_fb * num_year_fb).mean()
 
             res = stats.linregress(gtas, feedback)
-            fb_coef[(tip, fbn)] = res
+
+            #error computed with bootstrap
+            x = np.asarray(gtas)
+            y = np.asarray(feedback)
+            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+
+            fb_coef[(tip, fbn)] = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+)
+
 
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
@@ -2314,10 +2376,26 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
                 fb_pattern[(tip, fbn)] = (slope, stderr)
                 slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
-    
+
+    dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
     start_year = int(dRt[('cld', 'cloud')].year.min())
-    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num_year_fb * num_year_fb).mean()
-    fb_coef[('cld', 'cloud')] = stats.linregress(gtas, feedback)
+    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num * num).mean()
+    res = stats.linregress(gtas, feedback)
+   
+   #error computed with bootstrap
+    x = np.asarray(gtas)
+    y = np.asarray(feedback)
+    bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+   
+    fb_coef[('cld', 'cloud')]  = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+)
     
     return {
         "fb_coeffs": fb_coef,
@@ -2399,10 +2477,26 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
+            dRt[(tip, fbn)]=dRt[(tip, fbn)].groupby('time.year').mean('time')
             inter=calc_inter(dRt[(tip, fbn)], running_years)
 
             res = stats.linregress(temp,inter)
-            fb_coef[(tip, fbn)] = res
+
+            #error computed with bootstrap
+            x = np.asarray(temp)
+            y = np.asarray(inter)
+            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+
+            fb_coef[(tip, fbn)] = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+)
+
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
@@ -2418,10 +2512,25 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip +  ".nc", format="NETCDF4")
 
     #cloud
+    dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
     inter=calc_inter(dRt[('cld', 'cloud')], running_years)
     res = stats.linregress(temp,inter)
-    fb_coef['cld', 'cloud'] = res
+
+    #error computed with bootstrap
+    x = np.asarray(temp)
+    y = np.asarray(inter)
+    bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
     
+    fb_coef[('cld', 'cloud')]  = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+    )
+
     return {
         "fb_coeffs": fb_coef,
         "fb_pattern": fb_pattern if save_pattern else None,
@@ -2535,15 +2644,46 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
     if name!='cloud':
         for tip in ['clr', 'cld']:
             feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+".nc",  decode_times=time_coder)
+            feedbacks=feedbacks.groupby('time.year').mean('time')
             start_year = int(feedbacks.year.min())
             feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
 
             res = stats.linregress(gtas, feedback)
-            fb[(tip, name)] = res
+
+            #error computed with bootstrap
+            x = np.asarray(gtas)
+            y = np.asarray(feedback)
+            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+
+            fb[(tip, name)] = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+    )
     else:
         feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global.nc",  decode_times=time_coder)
+        feedbacks=feedbacks.groupby('time.year').mean('time')
         start_year = int(feedbacks.year.min())
         feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
-        fb = stats.linregress(gtas, feedback)
+        res = stats.linregress(gtas, feedback)
+
+        #error computed with bootstrap
+        x = np.asarray(gtas)
+        y = np.asarray(feedback)
+        bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+
+        fb=SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+)
 
     return fb

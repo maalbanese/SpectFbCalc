@@ -26,4 +26,12 @@ time_range_clim: #this is the time range for the reference dataset
 time_range_exp: #this is the time range for the experiment dataset, give it empty if you want to use the same as the reference dataset
    start: ""
    end: ""
+
+lon_range: #this is the longitude range for the dataset, give it empty if you want to use the same as the reference dataset
+   start: ""
+   end: ""
+lat_range: #this is the latitude range for the dataset, give it empty if you want to use the same as the reference dataset
+   start: ""
+   end: ""
+
 time_chunk: 12
