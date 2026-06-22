@@ -133,18 +133,16 @@ class Kernel:
             f")"
         )
 
-    def check_spatial_range(self, config):
-        lat_range=config['lat_range']     
-        lon_range=config['lon_range']  
+
+    def check_spatial_range(self, lat_range = None, lon_range = None):
         names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
         c=['clr','cld']
-        print('Lat range to apply:')
-        print(lat_range)
+
+        print('Lat range to apply:', lat_range)
         for tip in c:
             for cat in names:
                 self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
-        print('Lon range to apply')
-        print(lon_range)
+        print('Lon range to apply:', lon_range)
         for tip in c:
             for cat in names:
                 if lon_range['start'] > lon_range['end']:
@@ -638,24 +636,14 @@ class Experiment:
 
         self.variables = variables
     
-    def check_time_range(self, config, name):
-        if name =='exp':
-            time_range=config['time_range_exp']
-            print('using time_range_exp')
-        if name == 'clim':
-            time_range=config['time_range_clim']
-            print('using time_range_clim')
+    def check_time_range(self, time_range = None):
         if time_range is not None:
             self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
 
-    def check_spatial_range(self, config):
-        lat_range=config['lat_range']     
-        lon_range=config['lon_range']  
-        print('Lat range to apply:')
-        print(lat_range)
+    def check_spatial_range(self, lat_range = None, lon_range = None):
+        print('Lat range to apply:', lat_range)
         self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
-        print('Lon range to apply:')
-        print(lon_range)
+        print('Lon range to apply:', lon_range)
         if lon_range['start'] > lon_range['end']:
             self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
         else:
@@ -1145,7 +1133,7 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     # load kernel
     kernel = Kernel(ker, config = config, wv_method_spectral=wv_method_spectral)
     k = kernel.kernel[('clr', 't')]
-    kernel.check_spatial_range(config)
+    kernel.check_spatial_range(lat_range=config['lat_range'], lon_range=config['lon_range'])
 
     if ker == 'SPECTRAL':
         chunks_remap = {'lat': 30, 'lon': 36, 'time': 120}#, 'plev': 1}
@@ -1167,8 +1155,8 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     control.check_coords() 
     control.check_vars(variables = variables)
     control.vertical_interp(k)
-    control.check_time_range(config, 'clim')
-    control.check_spatial_range(config)
+    control.check_time_range(config['time_range_clim'])
+    control.check_spatial_range(lat_range=config['lat_range'], lon_range=config['lon_range'])
 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
@@ -1178,8 +1166,8 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     experiment.check_coords() 
     experiment.check_vars(variables = variables)
     experiment.vertical_interp(k)
-    experiment.check_time_range(config, 'exp')
-    experiment.check_spatial_range(config)
+    experiment.check_time_range(config['time_range_exp'])
+    experiment.check_spatial_range(lat_range=config['lat_range'], lon_range=config['lon_range'])
 
     # compute climatology and anomaly
     method = config['anomaly_method']
