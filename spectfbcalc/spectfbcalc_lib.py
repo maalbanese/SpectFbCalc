@@ -27,7 +27,8 @@ from difflib import get_close_matches
 import dask
 import psutil
 from xarray import unify_chunks
- 
+from types import SimpleNamespace
+
 from pathlib import Path
 from cdo import Cdo
 
@@ -130,15 +131,18 @@ class Kernel:
         lon_range=config['lon_range']  
         names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
         c=['clr','cld']
-        if lat_range is not None:
-            print('applying lat range to kernel')
-            for tip in c:
-                for cat in names:
-                    self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
-        if lon_range is not None:
-            print('applying lon range to kernel')
-            for tip in c:
-                for cat in names:
+        print('Lat range to apply:')
+        print(lat_range)
+        for tip in c:
+            for cat in names:
+                self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
+        print('Lon range to apply')
+        print(lon_range)
+        for tip in c:
+            for cat in names:
+                if lon_range['start'] > lon_range['end']:
+                    self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
+                else:
                     self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
 
  
@@ -426,11 +430,14 @@ class Experiment:
     def check_spatial_range(self, config):
         lat_range=config['lat_range']     
         lon_range=config['lon_range']  
-        if lat_range is not None:
-            print('applying lat range')
-            self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
-        if lon_range is not None:
-            print('applying lon range')
+        print('Lat range to apply:')
+        print(lat_range)
+        self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
+        print('Lon range to apply:')
+        print(lon_range)
+        if lon_range['start'] > lon_range['end']:
+            self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
+        else:
             self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
 
 
@@ -1950,8 +1957,6 @@ def open_dRt(cart_out, names=dRt_all):
         dRt[('cld', 'cloud')] = xr.open_dataarray(cart_out+"dRt_cloud_global.nc",  decode_times=time_coder)
     return dRt
 
-
-
 def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num=10):
     """
     Compute full radiative feedback decomposition and interannual regression
@@ -2063,7 +2068,22 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
             feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num * num).mean()
 
             res = stats.linregress(gtas, feedback)
-            fb_coef[(tip, fbn)] = res
+
+            #error computed with bootstrap
+            x = np.asarray(gtas)
+            y = np.asarray(feedback)
+            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+
+            fb_coef[(tip, fbn)] = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+)
+
 
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
@@ -2081,7 +2101,22 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
     dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
     start_year = int(dRt[('cld', 'cloud')].year.min())
     feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num * num).mean()
-    fb_coef[('cld', 'cloud')] = stats.linregress(gtas, feedback)
+    res = stats.linregress(gtas, feedback)
+   
+   #error computed with bootstrap
+    x = np.asarray(gtas)
+    y = np.asarray(feedback)
+    bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+   
+    fb_coef[('cld', 'cloud')]  = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+)
     
     return {
         "fb_coeffs": fb_coef,
@@ -2190,7 +2225,22 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
             inter=calc_inter(dRt[(tip, fbn)], running_years)
 
             res = stats.linregress(temp,inter)
-            fb_coef[(tip, fbn)] = res
+
+            #error computed with bootstrap
+            x = np.asarray(temp)
+            y = np.asarray(inter)
+            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+
+            fb_coef[(tip, fbn)] = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+)
+
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
@@ -2209,8 +2259,22 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
     inter=calc_inter(dRt[('cld', 'cloud')], running_years)
     res = stats.linregress(temp,inter)
-    fb_coef['cld', 'cloud'] = res
+
+    #error computed with bootstrap
+    x = np.asarray(temp)
+    y = np.asarray(inter)
+    bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
     
+    fb_coef[('cld', 'cloud')]  = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+    )
+
     return {
         "fb_coeffs": fb_coef,
         "fb_pattern": fb_pattern if save_pattern else None,
@@ -2329,12 +2393,41 @@ def single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_
             feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
 
             res = stats.linregress(gtas, feedback)
-            fb[(tip, name)] = res
+
+            #error computed with bootstrap
+            x = np.asarray(gtas)
+            y = np.asarray(feedback)
+            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+
+            fb[(tip, name)] = SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+    )
     else:
         feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global.nc",  decode_times=time_coder)
         feedbacks=feedbacks.groupby('time.year').mean('time')
         start_year = int(feedbacks.year.min())
         feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
-        fb = stats.linregress(gtas, feedback)
+        res = stats.linregress(gtas, feedback)
+
+        #error computed with bootstrap
+        x = np.asarray(gtas)
+        y = np.asarray(feedback)
+        bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+
+        fb=SimpleNamespace(
+    slope=res.slope,
+    intercept=res.intercept,
+    rvalue=res.rvalue,
+    pvalue=res.pvalue,
+    stderr=bs.standard_error,
+    ci_low=bs.confidence_interval.low,
+    ci_high=bs.confidence_interval.high,
+)
 
     return fb
