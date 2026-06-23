@@ -2714,4 +2714,20 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
 
         fb = regre_with_err(gtas, feedback, bootstrap_error=True)
 
-    return fb
+        if save_pattern:
+            print(f"Computing spatial feedback pattern for {tip}-{name}...")
+            # Open the dRt pattern
+            feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+name+"_pattern_"+tip +".nc", decode_times=time_coder) 
+            start_year = int(feedbacks_pattern.year.min())
+            feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
+            feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+            # Perform regression at each grid point
+            slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
+            fb_pattern= (slope, stderr)
+            slope.to_netcdf(cart_out + "feedback_pattern_"+ name +"_" + tip + ".nc", format="NETCDF4")
+            stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ name +"_" + tip + ".nc", format="NETCDF4")
+
+    return {
+        "fb_coeffs": fb,
+        "fb_pattern": fb_pattern if save_pattern else None,
+        }
