@@ -2122,7 +2122,7 @@ def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False, save_pattern=F
     """
 
     rad_fields = [('net_toa_cs', 'net_toa'), ('rlut', 'rlutcs'), ('rsut', 'rsutcs')]
-    names = ['cloud', 'cloud_lw', 'cloud_sw']
+    names = ['cloud', 'cloud-lw', 'cloud-sw']
     fbnams_all = [dRt_nocloud, dRt_nocloud_lw, dRt_nocloud_sw]
 
     dRts=[]
@@ -2263,6 +2263,7 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
 ##FEEDBACK COMPUTATION
         
 dRt_all=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo', 'cloud']
+dRt_all_cloud=['cloud', 'cloud-lw', 'cloud-sw']
 dRt_nocloud=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
 dRt_nocloud_lw=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor-lw']
 dRt_nocloud_sw=['water-vapor-sw', 'albedo']
@@ -2274,10 +2275,10 @@ def open_dRt(cart_out, names=dRt_all):
     dRt= {}
     for tip in ['clr', 'cld']:
         for i in names:
-            if i != 'cloud':
+            if 'cloud' not in i:
                 dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_global_"+tip+ ".nc",  decode_times=time_coder)
-    if 'cloud' in names:
-        dRt[('cld', 'cloud')] = xr.open_dataarray(cart_out+"dRt_cloud_global.nc",  decode_times=time_coder)
+            elif tip == 'cld':
+                dRt[('cld', i)] = xr.open_dataarray(cart_out+f"dRt_{i}_global.nc",  decode_times=time_coder)
     return dRt
 
 
@@ -2288,7 +2289,7 @@ def open_dRt_pattern(cart_out, names=dRt_all):
     dRt= {}
     for tip in ['clr', 'cld']:
         for i in names:
-            if 'cloud' not in 'i':
+            if 'cloud' not in i:
                 dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_pattern_"+tip+ ".nc",  decode_times=time_coder)
             elif tip == 'cld':
                 dRt[('cld', i)] = xr.open_dataarray(cart_out+"dRt_" + i + "_pattern.nc",  decode_times=time_coder)
@@ -2296,7 +2297,7 @@ def open_dRt_pattern(cart_out, names=dRt_all):
 
 
 
-def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num_year_fb=10):
+def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num_year_fb=10, fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo'], cloud_fbnams = ['cloud', 'cloud-lw', 'cloud-sw']):
     """
     Compute full radiative feedback decomposition and interannual regression
     against global mean surface temperature.
@@ -2355,13 +2356,15 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
 
     """
 
-    _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
-    
-    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
-    dRt={}
+    try:
+        dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
+    except Exception as exp:
+        print(exp)
+        _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
+        dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
+
     fb_coef = dict()
     fb_pattern = dict()
-    dRt=open_dRt(cart_out)
 
     #compute gtas
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
@@ -2389,6 +2392,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
                 feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip +".nc", decode_times=time_coder) 
+                feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
                 start_year = int(feedbacks_pattern.year.min())
                 feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
@@ -2399,11 +2403,27 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
                 slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
 
-    dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
-    start_year = int(dRt[('cld', 'cloud')].year.min())
-    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num_year_fb * num_year_fb).mean()
-    
-    fb_coef[('cld', 'cloud')] = regre_with_err(gtas, feedback, bootstrap_error=True)
+    for fbn in cloud_fbnams:
+        dRt[('cld', fbn)]=dRt[('cld', fbn)].groupby('time.year').mean('time')
+        start_year = int(dRt[('cld', fbn)].year.min())
+        feedback=dRt[('cld', fbn)].groupby((dRt[('cld', fbn)].year-start_year) // num_year_fb * num_year_fb).mean()
+        
+        fb_coef[('cld', fbn)] = regre_with_err(gtas, feedback, bootstrap_error=True)
+
+        if save_pattern:
+            print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
+            # Open the dRt pattern
+            feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern.nc", decode_times=time_coder) 
+            feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
+            start_year = int(feedbacks_pattern.year.min())
+            feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
+            feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+            
+            # Perform regression at each grid point
+            slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
+            fb_pattern[(tip, fbn)] = (slope, stderr)
+            slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn + ".nc", format="NETCDF4")
+            stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn + ".nc", format="NETCDF4")
     
     return {
         "fb_coeffs": fb_coef,
@@ -2443,7 +2463,7 @@ def calc_inter(ds, running_years):
     return trend
 
 
-def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, running_years=25):   
+def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, running_years=25, fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo'], cloud_fbnams = ['cloud', 'cloud-lw', 'cloud-sw']):   
     """
     Compute interannual radiative feedback coefficients using kernel-based anomalies
     and global temperature variability.
@@ -2491,13 +2511,18 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
 
     """ 
 
-    _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
-    
+    try:
+        dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
+    except Exception as exp:
+        print(exp)
+        _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
+        dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
+
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     dRt={}
     fb_coef = dict()
     fb_pattern = dict()
-    dRt=open_dRt(cart_out)
+    dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
 
     #compute gtas
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
@@ -2520,6 +2545,7 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
                 feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+ ".nc", decode_times=time_coder)
+                feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
                 feedbacks_pattern_dec=calc_inter(feedbacks_pattern, running_years)              
 
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
@@ -2527,14 +2553,32 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
                 # Perform regression at each grid point
                 slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas1)
                 fb_pattern[(tip, fbn)] = (slope, stderr)
-                slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
-                stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip +  ".nc", format="NETCDF4")
+                slope.to_netcdf(cart_out + "feedback_int_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
+                stderr.to_netcdf(cart_out + "feedback_int_pattern_error_"+ fbn +"_" + tip +  ".nc", format="NETCDF4")
 
     #cloud
-    dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
-    inter=calc_inter(dRt[('cld', 'cloud')], running_years)
+    for fbn in cloud_fbnams:
+        dRt[('cld', fbn)]=dRt[('cld', fbn)].groupby('time.year').mean('time')
+        inter=calc_inter(dRt[('cld', fbn)], running_years)
+        
+        fb_coef[('cld', fbn)] = regre_with_err(temp, inter, bootstrap_error=True)
+        
+        if save_pattern:
+            print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
+            # Open the dRt pattern
+            feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern.nc", decode_times=time_coder) 
+            feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
+            feedbacks_pattern_dec=calc_inter(feedbacks_pattern, running_years)
+
+            feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+            temp = temp.chunk({'year': -1})
+            
+            # Perform regression at each grid point
+            slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, temp)
+            fb_pattern[('cld', fbn)] = (slope, stderr)
+            slope.to_netcdf(cart_out + "feedback_int_pattern_"+ fbn + ".nc", format="NETCDF4")
+            stderr.to_netcdf(cart_out + "feedback_int_pattern_error_"+ fbn + ".nc", format="NETCDF4")
     
-    fb_coef[('cld', 'cloud')] = regre_with_err(temp, inter, bootstrap_error=True)
 
     return {
         "fb_coeffs": fb_coef,
