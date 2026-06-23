@@ -141,18 +141,21 @@ class Kernel:
             names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
         c=['clr','cld']
 
-        print('Lat range to apply:', lat_range)
-        for tip in c:
-            for cat in names:
-                self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
-        print('Lon range to apply:', lon_range)
-        for tip in c:
-            for cat in names:
-                if lon_range['start'] is not None:
-                    if lon_range['start'] > lon_range['end']:
-                        self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
-                    else:
-                        self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
+        if lat_range:
+            print('Lat range to apply:', lat_range)
+            for tip in c:
+                for cat in names:
+                    self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
+        
+        if lon_range:
+            print('Lon range to apply:', lon_range)
+            for tip in c:
+                for cat in names:
+                    if lon_range['start'] is not None:
+                        if lon_range['start'] > lon_range['end']:
+                            self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
+                        else:
+                            self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
 
  
 class Experiment:
@@ -641,18 +644,21 @@ class Experiment:
         self.variables = variables
     
     def check_time_range(self, time_range = None):
-        if time_range is not None:
+        if time_range:
             self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
 
     def check_spatial_range(self, lat_range = None, lon_range = None):
-        print('Lat range to apply:', lat_range)
-        self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
-        print('Lon range to apply:', lon_range)
-        if lon_range['start'] is not None:
-            if lon_range['start'] > lon_range['end']:
-                self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
-            else:
-                self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
+        if lat_range:
+            print('Lat range to apply:', lat_range)
+            self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
+
+        if lon_range:
+            print('Lon range to apply:', lon_range)
+            if lon_range['start'] is not None:
+                if lon_range['start'] > lon_range['end']:
+                    self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
+                else:
+                    self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
 
     def check_coords(self):
         if not self.ds:
