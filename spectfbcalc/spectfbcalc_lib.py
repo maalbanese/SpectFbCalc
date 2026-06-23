@@ -135,7 +135,10 @@ class Kernel:
 
 
     def check_spatial_range(self, lat_range = None, lon_range = None):
-        names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
+        if self.name == 'SPECTRAL':
+            names=['t', 'ts', 'wv_lw_lin', 'wv_lw_log', 'ozo', 'co2', 'ch4', 'n2o']
+        else:
+            names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
         c=['clr','cld']
 
         print('Lat range to apply:', lat_range)
@@ -145,10 +148,11 @@ class Kernel:
         print('Lon range to apply:', lon_range)
         for tip in c:
             for cat in names:
-                if lon_range['start'] > lon_range['end']:
-                    self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
-                else:
-                    self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
+                if lon_range['start'] is not None:
+                    if lon_range['start'] > lon_range['end']:
+                        self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
+                    else:
+                        self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
 
  
 class Experiment:
@@ -644,10 +648,11 @@ class Experiment:
         print('Lat range to apply:', lat_range)
         self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
         print('Lon range to apply:', lon_range)
-        if lon_range['start'] > lon_range['end']:
-            self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
-        else:
-            self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
+        if lon_range['start'] is not None:
+            if lon_range['start'] > lon_range['end']:
+                self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
+            else:
+                self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
 
     def check_coords(self):
         if not self.ds:
