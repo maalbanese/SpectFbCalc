@@ -1128,7 +1128,7 @@ def load_config(config_file, variable_mapping_file = None):
     return config
 
 
-def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None, control_file_dict = None, exp_file_dict = None, wv_method_spectral = 'hybrid'):
+def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None, control_file_dict = None, exp_file_dict = None, wv_method_spectral = 'hybrid', exp_name = None):
     """
     All the preprocessing needed before calling the feedback calculations:
         - Reads experiment, control and kernels;
@@ -1140,6 +1140,14 @@ def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, 
     
     # load config
     config = load_config(config_file, variable_mapping_file = variable_mapping_file)
+    if exp_name is not None:
+        print(f'new exp_name: {exp_name}')
+        cart_out = config['file_paths'].get("output")
+        ## Create dirs
+        cart_out_exp = cart_out + f'/{exp_name}/'
+        os.makedirs(cart_out_exp, exist_ok=True)
+        config['cart_out_exp'] = cart_out_exp
+        config['exp_name'] = exp_name
 
     # load kernel
     kernel = Kernel(ker, config = config, wv_method_spectral=wv_method_spectral)
