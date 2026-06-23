@@ -2074,7 +2074,7 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
     return radiation
 
 #CLOUD ANOMALY
-def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False):
+def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False, save_pattern=False):
     """
     Compute cloud radiative forcing (cloud feedback) anomalies using model output.
 
@@ -2121,39 +2121,36 @@ def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False):
     - dRt_cloud_global.nc
       (global mean cloud radiative anomaly)
     """
+
+    rad_fields = [('net_toa_cs', 'net_toa'), ('rlut', 'rlutcs'), ('rsut', 'rsutcs')]
+    names = ['cloud', 'cloud_lw', 'cloud_sw']
+    fbnams_all = [dRt_nocloud, dRt_nocloud_lw, dRt_nocloud_sw]
+
+    dRts=[]
+    for nam, radfi, fbnams in zip(names, rad_fields, fbnams_all):
+        crf = experiment.ds_anom[radfi[0]] - experiment.ds_anom[radfi[1]]
+        crf_glob= ctl.global_mean(crf)
+
+        dRt = open_dRt(cart_out, names=fbnams)
+        dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in fbnams])
+
+        dRt_cloud.load()
+        dRt_cloud.name=nam
+        dRt_cloud.to_netcdf(cart_out + f"dRt_{nam}_global.nc", format="NETCDF4")
+        dRts.append(dRt_cloud)
+
+        if save_pattern:
+            dRt = open_dRt_pattern(cart_out, names=fbnams)
+            dRt_cloud= -crf + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in fbnams])
+
+            dRt_cloud.load()
+            dRt_cloud.name=nam
+            dRt_cloud.to_netcdf(cart_out + f"dRt_{nam}_pattern.nc", format="NETCDF4")
     
-    crf = experiment.ds_anom['net_toa_cs'] - experiment.ds_anom['net_toa']
-    crf_glob= ctl.global_mean(crf)
-
-    dRt = open_dRt(cart_out, names=np.unique(dRt_nocloud + dRt_nocloud_lw + dRt_nocloud_sw))
-
-    dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud])
-    cloud = dRt_cloud.compute()
-    cloud.name='cloud'
-    cloud.to_netcdf(cart_out + "dRt_cloud_global.nc", format="NETCDF4")
-
-    # Now separate for LW and SW
-    crf = -experiment.ds_anom['rlutcs'] + experiment.ds_anom['rlut']
-    crf_glob= ctl.global_mean(crf)
-
-    dRt_cloud_lw = -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud_lw])
-    dRt_cloud_lw.load()
-    dRt_cloud_lw.name='cloud_lw'
-    dRt_cloud_lw.to_netcdf(cart_out + "dRt_cloud_lw_global.nc", format="NETCDF4")
-
-    # SW
-    crf = -experiment.ds_anom['rsutcs'] + experiment.ds_anom['rsut']
-    crf_glob= ctl.global_mean(crf)
-
-    dRt_cloud_sw = -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud_sw])
-    dRt_cloud_sw.load()
-    dRt_cloud_sw.name='cloud_sw'
-    dRt_cloud_sw.to_netcdf(cart_out + "dRt_cloud_sw_global.nc", format="NETCDF4")
-
     if output_lw_sw:
-        return cloud, dRt_cloud_lw, dRt_cloud_sw
+        return dRts
     else:
-        return cloud
+        return dRts[0]
 
 
 #ALL RAD_ANOM COMPUTATION
@@ -2257,7 +2254,7 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
         print('cloud')
         path = os.path.join(cart_out, "dRt_cloud_global.nc")
         if not os.path.exists(path) or force_recompute:
-            anom_cloud = Rad_anomaly_cloud(experiment, cart_out)
+            anom_cloud = Rad_anomaly_cloud(experiment, cart_out, save_pattern=save_pattern)
         else:
             print(f'Reading already computed anomaly from {path}')
             anom_cloud = xr.open_dataset(path) 
@@ -2282,6 +2279,20 @@ def open_dRt(cart_out, names=dRt_all):
                 dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_global_"+tip+ ".nc",  decode_times=time_coder)
     if 'cloud' in names:
         dRt[('cld', 'cloud')] = xr.open_dataarray(cart_out+"dRt_cloud_global.nc",  decode_times=time_coder)
+    return dRt
+
+
+def open_dRt_pattern(cart_out, names=dRt_all):
+    """
+    create a dict with dRt[(tip, i)] with tip 'clr' or 'cld' (sky condition) and i in names with all radiative anomalies at TOA
+    """
+    dRt= {}
+    for tip in ['clr', 'cld']:
+        for i in names:
+            if 'cloud' not in 'i':
+                dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_pattern_"+tip+ ".nc",  decode_times=time_coder)
+            elif tip == 'cld':
+                dRt[('cld', i)] = xr.open_dataarray(cart_out+"dRt_" + i + "_pattern.nc",  decode_times=time_coder)
     return dRt
 
 
