@@ -1885,7 +1885,7 @@ def Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern=False):
 
     for tip in [ 'clr','cld']:
         k = kernel.kernel[(tip, 'alb')]
-        dRt = (experiment.ds_anom['alb'].groupby("time.month") * k)
+        dRt = 100*(experiment.ds_anom['alb'].groupby("time.month") * k)
             
         #Save full dRt pattern before global averaging
         if save_pattern:
@@ -1895,11 +1895,10 @@ def Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern=False):
 
         #Then compute and save global mean
         dRt_glob = ctl.global_mean(dRt).compute()
-        alb = 100*dRt_glob
-        alb.name='albedo'
-        radiation[(tip, 'albedo')]= alb
-        alb.to_netcdf(cart_out+ "dRt_albedo_global_" +tip + ".nc", format="NETCDF4")
-        alb.close()
+        dRt_glob.name='albedo'
+        radiation[(tip, 'albedo')]= dRt_glob
+        dRt_glob.to_netcdf(cart_out+ "dRt_albedo_global_" +tip + ".nc", format="NETCDF4")
+        dRt_glob.close()
 
     return(radiation)
 
