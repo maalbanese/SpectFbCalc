@@ -2225,7 +2225,7 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
         print('cloud')
         path = os.path.join(cart_out, "dRt_cloud_global.nc")
         if not os.path.exists(path) or force_recompute:
-            anom_cloud = Rad_anomaly_cloud(experiment, control, cart_out)
+            anom_cloud = Rad_anomaly_cloud(experiment, cart_out)
         else:
             print(f'Reading already computed anomaly from {path}')
             anom_cloud = xr.open_dataset(path) 
@@ -2676,7 +2676,22 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
     pvalue=res.pvalue,
     stderr=bs.standard_error,
     ci_low=bs.confidence_interval.low,
-    ci_high=bs.confidence_interval.high,
-)
+    ci_high=bs.confidence_interval.high)
+    
+    if save_pattern ==True:
+        print(f"Computing spatial feedback pattern for {tip}-{name}...")
+        # Open the dRt pattern
+        feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+name+"_pattern_"+tip +".nc", decode_times=time_coder) 
+        start_year = int(feedbacks_pattern.year.min())
+        feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
+        feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+        # Perform regression at each grid point
+        slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
+        fb_pattern= (slope, stderr)
+        slope.to_netcdf(cart_out + "feedback_pattern_"+ name +"_" + tip + ".nc", format="NETCDF4")
+        stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ name +"_" + tip + ".nc", format="NETCDF4")
 
-    return fb
+    return {
+        "fb_coeffs": fb,
+        "fb_pattern": fb_pattern if save_pattern else None,
+        }
