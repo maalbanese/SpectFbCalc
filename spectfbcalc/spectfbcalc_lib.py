@@ -2383,23 +2383,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
             start_year = int(dRt[(tip, fbn)].year.min())
             feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num_year_fb * num_year_fb).mean()
 
-            res = stats.linregress(gtas, feedback)
-
-            #error computed with bootstrap
-            x = np.asarray(gtas)
-            y = np.asarray(feedback)
-            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
-
-            fb_coef[(tip, fbn)] = SimpleNamespace(
-    slope=res.slope,
-    intercept=res.intercept,
-    rvalue=res.rvalue,
-    pvalue=res.pvalue,
-    stderr=bs.standard_error,
-    ci_low=bs.confidence_interval.low,
-    ci_high=bs.confidence_interval.high,
-)
-
+            fb_coef[(tip, fbn)] = regre_with_err(gtas, feedback, bootstrap_error=True)
 
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
@@ -2408,6 +2392,7 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
                 start_year = int(feedbacks_pattern.year.min())
                 feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+                
                 # Perform regression at each grid point
                 slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
                 fb_pattern[(tip, fbn)] = (slope, stderr)
@@ -2416,28 +2401,40 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
 
     dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
     start_year = int(dRt[('cld', 'cloud')].year.min())
-    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num * num).mean()
-    res = stats.linregress(gtas, feedback)
-   
-   #error computed with bootstrap
-    x = np.asarray(gtas)
-    y = np.asarray(feedback)
-    bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
-   
-    fb_coef[('cld', 'cloud')]  = SimpleNamespace(
-    slope=res.slope,
-    intercept=res.intercept,
-    rvalue=res.rvalue,
-    pvalue=res.pvalue,
-    stderr=bs.standard_error,
-    ci_low=bs.confidence_interval.low,
-    ci_high=bs.confidence_interval.high,
-)
+    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num_year_fb * num_year_fb).mean()
+    
+    fb_coef[('cld', 'cloud')] = regre_with_err(gtas, feedback, bootstrap_error=True)
     
     return {
         "fb_coeffs": fb_coef,
         "fb_pattern": fb_pattern if save_pattern else None,
     }
+
+
+def regre_with_err(gtas, feedback, bootstrap_error = True):
+    """
+    1D regression with error. Choose among bootstrap and error from stats.linregress.
+    """
+    res = stats.linregress(gtas, feedback)
+
+    if not bootstrap_error:
+        return res
+    else: 
+        x = np.asarray(gtas)
+        y = np.asarray(feedback)
+        bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+    
+        fb_coef = SimpleNamespace(
+            slope=res.slope,
+            intercept=res.intercept,
+            rvalue=res.rvalue,
+            pvalue=res.pvalue,
+            stderr=bs.standard_error,
+            ci_low=bs.confidence_interval.low,
+            ci_high=bs.confidence_interval.high,
+            )
+    
+        return fb_coef
 
 
 def calc_inter(ds, running_years):
@@ -2517,22 +2514,7 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
             dRt[(tip, fbn)]=dRt[(tip, fbn)].groupby('time.year').mean('time')
             inter=calc_inter(dRt[(tip, fbn)], running_years)
 
-            res = stats.linregress(temp,inter)
-
-            #error computed with bootstrap
-            x = np.asarray(temp)
-            y = np.asarray(inter)
-            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
-
-            fb_coef[(tip, fbn)] = SimpleNamespace(
-    slope=res.slope,
-    intercept=res.intercept,
-    rvalue=res.rvalue,
-    pvalue=res.pvalue,
-    stderr=bs.standard_error,
-    ci_low=bs.confidence_interval.low,
-    ci_high=bs.confidence_interval.high,
-)
+            fb_coef[(tip, fbn)] = regre_with_err(temp, inter, bootstrap_error=True)
 
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
@@ -2551,22 +2533,8 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     #cloud
     dRt[('cld', 'cloud')]=dRt[('cld', 'cloud')].groupby('time.year').mean('time')
     inter=calc_inter(dRt[('cld', 'cloud')], running_years)
-    res = stats.linregress(temp,inter)
-
-    #error computed with bootstrap
-    x = np.asarray(temp)
-    y = np.asarray(inter)
-    bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
     
-    fb_coef[('cld', 'cloud')]  = SimpleNamespace(
-    slope=res.slope,
-    intercept=res.intercept,
-    rvalue=res.rvalue,
-    pvalue=res.pvalue,
-    stderr=bs.standard_error,
-    ci_low=bs.confidence_interval.low,
-    ci_high=bs.confidence_interval.high,
-    )
+    fb_coef[('cld', 'cloud')] = regre_with_err(temp, inter, bootstrap_error=True)
 
     return {
         "fb_coeffs": fb_coef,
@@ -2574,7 +2542,7 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
     }
 
 
-def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_mask=True, save_pattern=False, num=10):
+def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_mask=True, save_pattern=False, num_year_fb=10):
     """
     Compute interannual radiative feedback for a single radiative component.
 
@@ -2612,7 +2580,7 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
     save_pattern : bool, optional (default=False)
         If True, saves spatial anomaly patterns when computing missing components.
 
-    num : int, optional (default=10)
+    num_year_fb : int, optional (default=10)
         Number of years used for temporal binning before regression.
 
     Returns
@@ -2651,7 +2619,7 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
 
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
-    gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
+    gtas = gtas.groupby((gtas.year-start_year) // num_year_fb * num_year_fb).mean()
     
     if name != 'cloud':
         path = os.path.join(cart_out, "dRt_"+name+"_global_clr.nc")
@@ -2683,44 +2651,15 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
             feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+".nc",  decode_times=time_coder)
             feedbacks=feedbacks.groupby('time.year').mean('time')
             start_year = int(feedbacks.year.min())
-            feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
+            feedback=feedbacks.groupby((feedbacks.year-start_year) // num_year_fb * num_year_fb).mean()
 
-            res = stats.linregress(gtas, feedback)
-
-            #error computed with bootstrap
-            x = np.asarray(gtas)
-            y = np.asarray(feedback)
-            bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
-
-            fb[(tip, name)] = SimpleNamespace(
-    slope=res.slope,
-    intercept=res.intercept,
-    rvalue=res.rvalue,
-    pvalue=res.pvalue,
-    stderr=bs.standard_error,
-    ci_low=bs.confidence_interval.low,
-    ci_high=bs.confidence_interval.high,
-    )
+            fb[(tip, name)] = regre_with_err(gtas, feedback, bootstrap_error=True)
     else:
         feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global.nc",  decode_times=time_coder)
         feedbacks=feedbacks.groupby('time.year').mean('time')
         start_year = int(feedbacks.year.min())
-        feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
-        res = stats.linregress(gtas, feedback)
+        feedback=feedbacks.groupby((feedbacks.year-start_year) // num_year_fb * num_year_fb).mean()
 
-        #error computed with bootstrap
-        x = np.asarray(gtas)
-        y = np.asarray(feedback)
-        bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
-
-        fb=SimpleNamespace(
-    slope=res.slope,
-    intercept=res.intercept,
-    rvalue=res.rvalue,
-    pvalue=res.pvalue,
-    stderr=bs.standard_error,
-    ci_low=bs.confidence_interval.low,
-    ci_high=bs.confidence_interval.high,
-)
+        fb = regre_with_err(gtas, feedback, bootstrap_error=True)
 
     return fb
