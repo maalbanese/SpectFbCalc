@@ -141,18 +141,21 @@ class Kernel:
             names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
         c=['clr','cld']
 
-        print('Lat range to apply:', lat_range)
-        for tip in c:
-            for cat in names:
-                self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
-        print('Lon range to apply:', lon_range)
-        for tip in c:
-            for cat in names:
-                if lon_range['start'] is not None:
-                    if lon_range['start'] > lon_range['end']:
-                        self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
-                    else:
-                        self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
+        if lat_range:
+            print('Lat range to apply:', lat_range)
+            for tip in c:
+                for cat in names:
+                    self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
+        
+        if lon_range:
+            print('Lon range to apply:', lon_range)
+            for tip in c:
+                for cat in names:
+                    if lon_range['start'] is not None:
+                        if lon_range['start'] > lon_range['end']:
+                            self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
+                        else:
+                            self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
 
  
 class Experiment:
@@ -641,18 +644,21 @@ class Experiment:
         self.variables = variables
     
     def check_time_range(self, time_range = None):
-        if time_range is not None:
+        if time_range:
             self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
 
     def check_spatial_range(self, lat_range = None, lon_range = None):
-        print('Lat range to apply:', lat_range)
-        self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
-        print('Lon range to apply:', lon_range)
-        if lon_range['start'] is not None:
-            if lon_range['start'] > lon_range['end']:
-                self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
-            else:
-                self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
+        if lat_range:
+            print('Lat range to apply:', lat_range)
+            self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
+
+        if lon_range:
+            print('Lon range to apply:', lon_range)
+            if lon_range['start'] is not None:
+                if lon_range['start'] > lon_range['end']:
+                    self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
+                else:
+                    self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
 
     def check_coords(self):
         if not self.ds:
@@ -1700,9 +1706,13 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
             #.groupby("time.year").mean(method="map-reduce", engine="flox")
         else:
             dRt = (experiment.ds_anom['ts'].groupby("time.month") * k)
+        
+        # dRt = month_calc(experiment.ds_anom['ts'], k)
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
+            print('in save patt')
+            dRt.load()
             dRt.name = "dRt"
             dRt.attrs["description"] = f"{tip} surface Planck dRt pattern"
             dRt.to_netcdf(cart_out + "dRt_planck-surf_pattern_" + tip +".nc", format="NETCDF4")
@@ -1793,6 +1803,8 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
         else:
             dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev")
             dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev")
+            # dRt_unif = month_calc(anoms_unif, (k * kernel.dp)).sum("plev")
+            # dRt_lr = month_calc(anoms_lr, (k * kernel.dp)).sum("plev")
 
 
         #Save full dRt pattern before global averaging
@@ -2041,16 +2053,16 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
             dRt_glob_lw.load()
             print('Computed')
 
-        dRt_glob_lw.name='water-vapor_lw'
-        dRt_glob_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
-        radiation[(tip, 'water-vapor_lw')] = dRt_glob_lw
+        dRt_glob_lw.name='water-vapor-lw'
+        dRt_glob_lw.to_netcdf(cart_out+ "dRt_water-vapor-lw_global_" +tip+ ".nc", format="NETCDF4")
+        radiation[(tip, 'water-vapor-lw')] = dRt_glob_lw
         
         if kernel.name != 'SPECTRAL':
             dRt_glob_sw = ctl.global_mean(dRt_sw)
             dRt_glob_sw.load()
-            dRt_glob_sw.name='water-vapor_sw'
-            radiation[(tip, 'water-vapor_sw')] = dRt_glob_sw
-            dRt_glob_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
+            dRt_glob_sw.name='water-vapor-sw'
+            radiation[(tip, 'water-vapor-sw')] = dRt_glob_sw
+            dRt_glob_sw.to_netcdf(cart_out+ "dRt_water-vapor-sw_global_" +tip+ ".nc", format="NETCDF4")
   
             dRt_glob = ctl.global_mean(dRt)
             dRt_glob.load()
@@ -2062,7 +2074,7 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
     return radiation
 
 #CLOUD ANOMALY
-def Rad_anomaly_cloud(experiment, cart_out):
+def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False, save_pattern=False):
     """
     Compute cloud radiative forcing (cloud feedback) anomalies using model output.
 
@@ -2109,19 +2121,36 @@ def Rad_anomaly_cloud(experiment, cart_out):
     - dRt_cloud_global.nc
       (global mean cloud radiative anomaly)
     """
-    dRt={}
+
+    rad_fields = [('net_toa_cs', 'net_toa'), ('rlut', 'rlutcs'), ('rsut', 'rsutcs')]
+    names = ['cloud', 'cloud_lw', 'cloud_sw']
+    fbnams_all = [dRt_nocloud, dRt_nocloud_lw, dRt_nocloud_sw]
+
+    dRts=[]
+    for nam, radfi, fbnams in zip(names, rad_fields, fbnams_all):
+        crf = experiment.ds_anom[radfi[0]] - experiment.ds_anom[radfi[1]]
+        crf_glob= ctl.global_mean(crf)
+
+        dRt = open_dRt(cart_out, names=fbnams)
+        dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in fbnams])
+
+        dRt_cloud.load()
+        dRt_cloud.name=nam
+        dRt_cloud.to_netcdf(cart_out + f"dRt_{nam}_global.nc", format="NETCDF4")
+        dRts.append(dRt_cloud)
+
+        if save_pattern:
+            dRt = open_dRt_pattern(cart_out, names=fbnams)
+            dRt_cloud= -crf + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in fbnams])
+
+            dRt_cloud.load()
+            dRt_cloud.name=nam
+            dRt_cloud.to_netcdf(cart_out + f"dRt_{nam}_pattern.nc", format="NETCDF4")
     
-    crf = experiment.ds_anom['net_toa_cs'] - experiment.ds_anom['net_toa']
-
-    crf_glob= ctl.global_mean(crf)
-
-    dRt = open_dRt(cart_out, names=dRt_nocloud)
-
-    dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud])
-    cloud = dRt_cloud.compute()
-    cloud.name='cloud'
-    cloud.to_netcdf(cart_out + "dRt_cloud_global.nc", format="NETCDF4")
-    return cloud
+    if output_lw_sw:
+        return dRts
+    else:
+        return dRts[0]
 
 
 #ALL RAD_ANOM COMPUTATION
@@ -2225,7 +2254,7 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
         print('cloud')
         path = os.path.join(cart_out, "dRt_cloud_global.nc")
         if not os.path.exists(path) or force_recompute:
-            anom_cloud = Rad_anomaly_cloud(experiment, cart_out)
+            anom_cloud = Rad_anomaly_cloud(experiment, cart_out, save_pattern=save_pattern)
         else:
             print(f'Reading already computed anomaly from {path}')
             anom_cloud = xr.open_dataset(path) 
@@ -2236,6 +2265,8 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
         
 dRt_all=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo', 'cloud']
 dRt_nocloud=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+dRt_nocloud_lw=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor-lw']
+dRt_nocloud_sw=['water-vapor-sw', 'albedo']
 
 def open_dRt(cart_out, names=dRt_all):
     """
@@ -2248,6 +2279,20 @@ def open_dRt(cart_out, names=dRt_all):
                 dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_global_"+tip+ ".nc",  decode_times=time_coder)
     if 'cloud' in names:
         dRt[('cld', 'cloud')] = xr.open_dataarray(cart_out+"dRt_cloud_global.nc",  decode_times=time_coder)
+    return dRt
+
+
+def open_dRt_pattern(cart_out, names=dRt_all):
+    """
+    create a dict with dRt[(tip, i)] with tip 'clr' or 'cld' (sky condition) and i in names with all radiative anomalies at TOA
+    """
+    dRt= {}
+    for tip in ['clr', 'cld']:
+        for i in names:
+            if 'cloud' not in 'i':
+                dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_pattern_"+tip+ ".nc",  decode_times=time_coder)
+            elif tip == 'cld':
+                dRt[('cld', i)] = xr.open_dataarray(cart_out+"dRt_" + i + "_pattern.nc",  decode_times=time_coder)
     return dRt
 
 
@@ -2631,7 +2676,7 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
             Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
         
         elif name == 'cloud':
-            Rad_anomaly_cloud(experiment, control, cart_out)
+            Rad_anomaly_cloud(experiment, cart_out)
     
     fb=dict()
     if name!='cloud':
