@@ -1706,9 +1706,13 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
             #.groupby("time.year").mean(method="map-reduce", engine="flox")
         else:
             dRt = (experiment.ds_anom['ts'].groupby("time.month") * k)
+        
+        # dRt = month_calc(experiment.ds_anom['ts'], k)
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
+            print('in save patt')
+            dRt.load()
             dRt.name = "dRt"
             dRt.attrs["description"] = f"{tip} surface Planck dRt pattern"
             dRt.to_netcdf(cart_out + "dRt_planck-surf_pattern_" + tip +".nc", format="NETCDF4")
@@ -1799,6 +1803,8 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
         else:
             dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev")
             dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev")
+            # dRt_unif = month_calc(anoms_unif, (k * kernel.dp)).sum("plev")
+            # dRt_lr = month_calc(anoms_lr, (k * kernel.dp)).sum("plev")
 
 
         #Save full dRt pattern before global averaging
@@ -2047,16 +2053,16 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
             dRt_glob_lw.load()
             print('Computed')
 
-        dRt_glob_lw.name='water-vapor_lw'
-        dRt_glob_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
-        radiation[(tip, 'water-vapor_lw')] = dRt_glob_lw
+        dRt_glob_lw.name='water-vapor-lw'
+        dRt_glob_lw.to_netcdf(cart_out+ "dRt_water-vapor-lw_global_" +tip+ ".nc", format="NETCDF4")
+        radiation[(tip, 'water-vapor-lw')] = dRt_glob_lw
         
         if kernel.name != 'SPECTRAL':
             dRt_glob_sw = ctl.global_mean(dRt_sw)
             dRt_glob_sw.load()
-            dRt_glob_sw.name='water-vapor_sw'
-            radiation[(tip, 'water-vapor_sw')] = dRt_glob_sw
-            dRt_glob_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
+            dRt_glob_sw.name='water-vapor-sw'
+            radiation[(tip, 'water-vapor-sw')] = dRt_glob_sw
+            dRt_glob_sw.to_netcdf(cart_out+ "dRt_water-vapor-sw_global_" +tip+ ".nc", format="NETCDF4")
   
             dRt_glob = ctl.global_mean(dRt)
             dRt_glob.load()
@@ -2068,7 +2074,7 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
     return radiation
 
 #CLOUD ANOMALY
-def Rad_anomaly_cloud(experiment, cart_out):
+def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False):
     """
     Compute cloud radiative forcing (cloud feedback) anomalies using model output.
 
@@ -2115,19 +2121,39 @@ def Rad_anomaly_cloud(experiment, cart_out):
     - dRt_cloud_global.nc
       (global mean cloud radiative anomaly)
     """
-    dRt={}
     
     crf = experiment.ds_anom['net_toa_cs'] - experiment.ds_anom['net_toa']
-
     crf_glob= ctl.global_mean(crf)
 
-    dRt = open_dRt(cart_out, names=dRt_nocloud)
+    dRt = open_dRt(cart_out, names=np.unique(dRt_nocloud + dRt_nocloud_lw + dRt_nocloud_sw))
 
     dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud])
     cloud = dRt_cloud.compute()
     cloud.name='cloud'
     cloud.to_netcdf(cart_out + "dRt_cloud_global.nc", format="NETCDF4")
-    return cloud
+
+    # Now separate for LW and SW
+    crf = -experiment.ds_anom['rlutcs'] + experiment.ds_anom['rlut']
+    crf_glob= ctl.global_mean(crf)
+
+    dRt_cloud_lw = -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud_lw])
+    dRt_cloud_lw.load()
+    dRt_cloud_lw.name='cloud_lw'
+    dRt_cloud_lw.to_netcdf(cart_out + "dRt_cloud_lw_global.nc", format="NETCDF4")
+
+    # SW
+    crf = -experiment.ds_anom['rsutcs'] + experiment.ds_anom['rsut']
+    crf_glob= ctl.global_mean(crf)
+
+    dRt_cloud_sw = -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud_sw])
+    dRt_cloud_sw.load()
+    dRt_cloud_sw.name='cloud_sw'
+    dRt_cloud_sw.to_netcdf(cart_out + "dRt_cloud_sw_global.nc", format="NETCDF4")
+
+    if output_lw_sw:
+        return cloud, dRt_cloud_lw, dRt_cloud_sw
+    else:
+        return cloud
 
 
 #ALL RAD_ANOM COMPUTATION
@@ -2231,7 +2257,7 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
         print('cloud')
         path = os.path.join(cart_out, "dRt_cloud_global.nc")
         if not os.path.exists(path) or force_recompute:
-            anom_cloud = Rad_anomaly_cloud(experiment, control, cart_out)
+            anom_cloud = Rad_anomaly_cloud(experiment, cart_out)
         else:
             print(f'Reading already computed anomaly from {path}')
             anom_cloud = xr.open_dataset(path) 
@@ -2242,6 +2268,8 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
         
 dRt_all=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo', 'cloud']
 dRt_nocloud=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+dRt_nocloud_lw=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor-lw']
+dRt_nocloud_sw=['water-vapor-sw', 'albedo']
 
 def open_dRt(cart_out, names=dRt_all):
     """
@@ -2637,7 +2665,7 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
             Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
         
         elif name == 'cloud':
-            Rad_anomaly_cloud(experiment, control, cart_out)
+            Rad_anomaly_cloud(experiment, cart_out)
     
     fb=dict()
     if name!='cloud':
