@@ -1,10 +1,27 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
+"""
+Radiative Anomalies and Climate Feedback Calculation Library
 
-### Our library!
+This module provides a comprehensive suite of tools for processing climate model 
+outputs, applying radiative kernels, and computing climate feedbacks. It includes 
+classes and functions for lazy loading of large NetCDF datasets, horizontal and vertical 
+remapping, computation of climatologies and anomalies, and linear regression 
+analysis for feedback quantification.
+
+Supported Radiative Kernels:
+    * HUANG (Huang et Huang, 2023)
+    * ERA5 (Soden et al., 2008)
+    * SPECTRAL
+
+Dependencies:
+    * xarray, dask, numpy, scipy, pandas
+    * cdo, smmregrid, climtools
+"""
 
 ##### Package imports
 
+from __future__ import annotations
 from logging import config
 import sys
 import os
@@ -31,6 +48,7 @@ from types import SimpleNamespace
 
 from pathlib import Path
 from cdo import Cdo
+from typing import Literal, Any
 
 ######################################################################
 ### Functions 
@@ -43,25 +61,57 @@ STD_VARS_ECE4 = {"hus", "rlut", "rsdt", "rlntcs", "rsut", "rsntcs", "alb", "ta",
 STD_VARS_SPECT = {"wv_vmr", "wv_vmr_log", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 
 
-def regrid(ds, target_ds):
+def regrid(ds: xr.DataArray | xr.Dataset, target_ds: xr.Dataset | xr.DataArray) -> xr.DataArray | xr.Dataset:
     """
-    Wrapper to ctl.regrid, to avoid data array loses name
+    Wrapper to ctl.regrid_dataset to ensure the data array does not lose its name
+    during the horizontal remapping process.
+
+    Parameters
+    ----------
+    ds
+        The input data to be regridded.
+    target_ds
+        The target dataset containing the destination coordinates (`lat` and `lon`).
+
+    Returns
+    -------
+    coso
+        The regridded data preserving the original name.
     """
     coso = ctl.regrid_dataset(ds, target_ds.lat, target_ds.lon)
     coso.name = ds.name
     return coso
 
 
-
 class Kernel:
     """
-    Loads the kernels and the additional information needed.  
+    Loads radiative kernels and the additional information needed for feedback calculations.  
     
+    Parameters
     ----------
-    name : one among "HUANG", "ERA5", "SPECTRAL"
+    name 
+        Identifier of the kernel to load. Must be one of: "HUANG", "ERA5", "SPECTRAL".
+    config
+        Configuration dictionary loaded from the YAML file. If provided, paths are extracted from it.
+    path_input
+        Direct path to the kernel directory. Required if `config` is not provided.
+    filename_template
+        Template string for the kernel filenames (e.g., 'ERA5_kernel_{}_TOA.nc'). 
+        Required if `config` is not provided.
+    
+    Attributes
+    ----------
+    name : str
+        The name of the loaded kernel.
+    kernel : dict or xarray.Dataset
+        The actual kernel data loaded into memory.
+    dp : xarray.DataArray
+        The width of the atmospheric layers (in hPa or Pa depending on the kernel).
+    use_log_wv : bool
+        Flag indicating if the kernel requires logarithmic water vapor (e.g., True for HUANG).
     """
- 
-    def __init__(self, name, config = None, path_input = None, filename_template = None, wv_method_spectral = 'hybrid') -> None:
+
+    def __init__(self, name: Literal['HUANG', 'ERA5', 'SPECTRAL'], config: dict[str, Any] | None = None, path_input: str | None = None, filename_template: str | None = None, wv_method_spectral: str = 'hybrid') -> None:
         if name not in ['HUANG', 'ERA5', 'SPECTRAL']:
             raise ValueError(f'kernel name {name} not supported')
             
@@ -91,13 +141,16 @@ class Kernel:
             self.dp = self.dp/100. # in units of 100 hPa
 
 
-    def recompute_dp(self, experiment) -> None:
+    def recompute_dp(self, experiment: Experiment) -> None:
         """
-        Recomputes the atmospheric layers based on the model's surface pressure.
+        Recomputes the width of atmospheric layers (dp) based on the model's 
+        actual surface pressure, dynamically masking layers below the surface.
 
-        experiment is an Experiment instance
+        Parameters
+        ----------
+        experiment 
+            An instance of the Experiment class containing the model's surface pressure data.
         """
-
         if "surf_pressure" not in experiment.ds:
             print(f"Surface pressure not available in experiment {experiment.name}, using default dp for kernel {self.name}")
             return
@@ -134,13 +187,28 @@ class Kernel:
         )
 
 
-    def check_spatial_range(self, lat_range = None, lon_range = None):
+    def check_spatial_range(self, lat_range: dict[str, float] | None = None, lon_range: dict[str, float] | None = None) -> None:
+        """
+        Subsets the kernel variables and layer widths over specified spatial ranges.
+
+        This method dynamically applies spatial slicing to all variables stored in the 
+        `kernel` dictionary and to the `dp` attribute to ensure dimension consistency.
+        It handles standard latitude slicing (accounting for coordinate orientation) 
+        and supports crossing the prime meridian for longitude ranges on a 0-360 grid.
+
+        Parameters
+        ----------
+        lat_range : dict, optional
+            Dictionary containing 'start' and 'end' keys for the latitude bounds.
+        lon_range : dict, optional
+            Dictionary containing 'start' and 'end' keys for the longitude bounds.
+        """
         if self.name == 'SPECTRAL':
             names=['t', 'ts', 'wv_lw_lin', 'wv_lw_log', 'ozo', 'co2', 'ch4', 'n2o']
         else:
             names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
         c=['clr','cld']
-
+        
         if lat_range:
             print('Lat range to apply:', lat_range)
             for tip in c:
@@ -156,27 +224,51 @@ class Kernel:
                             self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
                         else:
                             self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
-
  
 class Experiment:
     """
-    Loads the data of a specific experiment.  
+    Loads and manages the data of a specific climate experiment.  
     
+    Parameters
     ----------
-    name : str
-        An identifying name for the experiment (e.g. {model}_{member}_{exp_type})
-    variables : set[str]
+    name
+        An identifying name for the experiment (e.g. {model}_{member}_{exp_type}).
+    orig_dir
+        Directory containing the original raw NetCDF files.
+    remap_dir
+        Directory where remapped datasets are stored or will be saved.
+    raw_variables
         Climate variable names tracked by this instance.
-    dataset : xr.Dataset
-        Merged lazy dataset of remapped data populated by `load_remapped`.
+    time_chunk : int, default 20
+        Chunk size for the time dimension during lazy loading.
+    variable_mapping
+        Dictionary mapping internal standard variables to specific model variable names.
+    file_dict
+        Dictionary of raw file paths. If None, it will be generated automatically.
+    
+    Attributes
+    ----------
+    ds : xarray.Dataset
+        Merged dataset containing the remapped variables.
+    ds_clim : xarray.Dataset
+        Dataset containing the computed climatology.
+    ds_anom : xarray.Dataset
+        Dataset containing the computed anomalies.
+    raw_data : dict
+        Dictionary holding the raw xarray.DataArray objects before remapping.
+    surf_pressure : xarray.DataArray
+        Remapped and time-averaged surface pressure data (if loaded).
     """
- 
-    def __init__(self, name, orig_dir, remap_dir = "remapped", raw_variables = STD_VARS_NOALB, time_chunk = 20, variable_mapping = None, file_dict = None, chunks_remap = {'time': 120}) -> None:
-        self.name: str = name
-        self.raw_variables: set[str] | list[str] | tuple[str] = raw_variables
+    def __init__(self, name: str, orig_dir: str | Path, remap_dir: str | Path = "remapped", raw_variables: set[str] | list[str] | tuple[str] = STD_VARS_NOALB, time_chunk: int = 20, variable_mapping: dict[str, str] | None = None, file_dict: dict[str, Any] | None = None, chunks_remap: dict[str, int] | None = None) -> None:
         
-        self.orig_dir: Path = Path(orig_dir)
-        self.remap_dir: Path = Path(remap_dir)
+        if chunks_remap is None:
+            chunks_remap = {'time': 120}
+
+        self.name = name
+        self.raw_variables = raw_variables
+        
+        self.orig_dir = Path(orig_dir)
+        self.remap_dir = Path(remap_dir)
 
         self.remap_dir.mkdir(parents=True, exist_ok=True)
         self.chunks = {'time': time_chunk}
@@ -200,7 +292,10 @@ class Experiment:
     # ------------------------------------------------------------------
     # 1. Lazy loading of raw DataArrays
     # ------------------------------------------------------------------
-    def load_file_dict(self):
+    def load_file_dict(self) -> None:
+        """
+        Loads the file paths for each variable in `self.raw_variables` from `self.orig_dir` and stores them in `self.file_dict`.
+        """
         file_dict = {}
         for var in self.raw_variables:
             base_folder = self.orig_dir / self.variable_mapping[var]
@@ -210,7 +305,9 @@ class Experiment:
         
             if not files:
                 files = sorted(base_folder.glob(f"**/{pattern}"))
-        
+            if not files:
+                raise FileNotFoundError(f"No files found for variable {var}")
+            
             file_dict[var] = files
 
         self.file_dict = file_dict
@@ -250,7 +347,7 @@ class Experiment:
         """
         Lazily open each file in *file_dict* as an xr.DataArray and store
         them in ``self.raw_data``.
- 
+        
         Parameters
         ----------
         file_dict : list of path-like
@@ -276,18 +373,32 @@ class Experiment:
     # ------------------------------------------------------------------
     # 2. CDO remapping to a target grid
     # ------------------------------------------------------------------
-    def prepare_input_dataset(self, target_grid_ds: xr.Dataset, cdo_method: str = "ycon") -> None:
+    def prepare_input_dataset(self, target_grid_ds: xr.Dataset | xr.DataArray, cdo_method: str | None = None) -> None:
         """
         Orchestrates the data availability. Checks if remapped data exists on disk.
         If not, processes it using the best tool available (smmregrid/CDO or internal remap).
+
+        Parameters
+        ----------
+        target_grid_ds 
+            The target dataset (the kernel) whose grid will be used for interpolation.
+        cdo_method 
+            If specified, forces the use of a particular CDO remapping method (e.g., "remapbil", "remapcon", "ycon", etc.) when smmregrid is used for unstructured grids. 
+            If None, defaults to "ycon" for unstructured grids.
         """
+        if cdo_method is None:
+            cdo_method = "ycon"
+
         if self.check_remapped():
             self.load_remapped()
             return
 
         print(f"Remapped data not found in: {self.remap_dir}, computing...")
         
-        first_var = next(v for v in self.file_dict if self.file_dict[v])
+        try:
+            first_var = next(v for v in self.file_dict if self.file_dict[v])
+        except StopIteration:
+            raise ValueError("No variables with files found in file_dict!")
         with xr.open_dataset(self.file_dict[first_var][0]) as ds_check:
             is_unstructured = 'cell' in ds_check.dims
 
@@ -299,15 +410,19 @@ class Experiment:
             self.load_raw()
             self.remap(target_ds=target_grid_ds, save_remapped=True)
 
-    def _resolve_target_grid(self, target_grid_file) -> str:
+    def _resolve_target_grid(self, target_grid_file: str | Path | xr.Dataset | xr.DataArray) -> str:
         """
         Resolves the target grid to a CDO-compatible string or file path.
         For xr.Dataset/DataArray (e.g. kernel), builds a CDO grid string from lat/lon coords.
+
+        Parameters
+        ----------
+        target_grid_file
+            The target grid specification. Can be a file path or an xarray object containing lat/lon coordinates.
         """
         import subprocess
 
         if isinstance(target_grid_file, (xr.Dataset, xr.DataArray)):
-            # Estrai lat/lon dalla DataArray/Dataset del kernel
             if isinstance(target_grid_file, xr.DataArray):
                 ds = target_grid_file.to_dataset(name=target_grid_file.name or 'data')
             else:
@@ -330,25 +445,22 @@ class Experiment:
                 )
                 temp_target = temp_nc3
             return str(temp_target)
-
         else:
             return str(target_grid_file)
 
-    def remap(self, target_ds: xr.Dataset, save_remapped = False) -> None:
+    def remap(self, target_ds: xr.Dataset | xr.DataArray, save_remapped: bool = False) -> None:
         """
-        Interpolates to target_ds (the kernel ds).
+        Interpolates the raw data to the horizontal grid of the target dataset.
  
         Parameters
         ----------
-        target_ds
-
-        save_rempped
+        target_ds 
+            The target dataset (the kernel) whose grid will be used for interpolation.
+        save_remapped 
+            If True, saves the newly remapped variables to disk as NetCDF files.
         """
-
-        ### Improve! use smmregrid instead. compatibility with gaussian reduced/curvilinear?
         remapped = {var: regrid(self.raw_data[var], target_ds) for var in self.raw_variables}
 
-        # compute and save
         if save_remapped:
             print("Saving remapped to disk")
             for var, ds in remapped.items():
@@ -358,21 +470,16 @@ class Experiment:
         self.ds = xr.merge([remapped[var] for var in remapped])
 
 
-    def remap_cdo(
-        self,
-        target_grid_file: str | Path | xr.Dataset,
-        method: str = "remapbil",
-    ) -> None:
+    def remap_cdo(self, target_grid_file: str | Path | xr.Dataset | xr.DataArray, method: str = "remapbil") -> None:
         """
         Interpolate each file in *file_dict* to the grid of *target_grid_file*.
         Uses CDO for regular grids, and smmregrid for EC-Earth4 unstructured grids.
+        
         Parameters
         ----------
-        file_dict : list of path-like
-            Source files to be remapped.
-        target_grid_file : path-like or xr.Dataset
-            NetCDF file or xarray Dataset whose grid defines the target resolution.
-        method : str
+        target_grid_file 
+            NetCDF file or xarray object whose grid defines the target resolution.
+        method
             CDO remapping operator: ``"remapbil"`` (default), ``"remapcon"``,
             ``"remapnn"``, etc.
         """
@@ -453,7 +560,17 @@ class Experiment:
                 for f in tmp_files:
                     f.unlink()
     
-    def vertical_interp(self, target_ds):
+    def vertical_interp(self, target_ds: xr.Dataset | xr.DataArray) -> None:
+        """
+        Checks and converts the vertical pressure coordinates (if needed) 
+        and interpolates the dataset to the vertical levels of the target kernel.
+
+        Parameters
+        ----------
+        target_ds
+            The target dataset (usually the kernel) containing the destination 
+            pressure levels (`plev`).
+        """
         print('check vertical dimension')
         self.ds = check_vertical(self.ds)
         self.ds = self.ds.interp(plev = target_ds.plev)
@@ -464,15 +581,9 @@ class Experiment:
  
     def load_remapped(self) -> None:
         """
-        Lazily read all remapped files in ``self.remap_dir`` and merge them
-        into a single xr.Dataset stored in ``self.dataset``.
- 
-        Parameters
-        ----------
-        pattern : str
-            Glob pattern to discover files inside ``self.remap_dir``.
+        Lazily reads all previously remapped files found in `self.remap_dir` 
+        and merges them into a single xarray.Dataset stored in `self.ds`.
         """
-
         pattern = f"*_{self.name}_remapped.nc"
         files = sorted(self.remap_dir.glob(pattern))
         if len(files) > 0:
@@ -481,13 +592,10 @@ class Experiment:
             raise ValueError('No remapped dataset found on disk!')
             # Alternatively, can compute them from raw
 
-    def check_remapped(self) -> None:
+    def check_remapped(self) -> bool:
         """
-        Check if remapped files are there.
-
-        IMPROVE: check that all variables are there
+        Check if remapped files are there. If at least one file matching the pattern is found, assumes remapping has been done.
         """
-
         pattern = f"*_{self.name}_remapped.nc"
         files = sorted(self.remap_dir.glob(pattern))
         if len(files) > 0:
@@ -497,10 +605,17 @@ class Experiment:
             return False
 
 
-    def load_surf_pressure(self, pressure_path, target_ds) -> None:
+    def load_surf_pressure(self, pressure_path: str, target_ds: xr.Dataset | xr.DataArray) -> None:
         """
-        Loads surface pressure to compute atmospheric layers.
-        Interpolates to kernel grid
+        Loads surface pressure data, interpolates it to the kernel grid, 
+        and computes its climatology.
+
+        Parameters
+        ----------
+        pressure_path
+            File path pattern (e.g., glob pattern) to the surface pressure NetCDF files.
+        target_ds
+            The target dataset (the kernel) defining the destination grid for remapping.
         """
         if not pressure_path:
             print("No pressure path provided.")
@@ -545,7 +660,11 @@ class Experiment:
         self.surf_pressure = psye.compute()
         print("Surface pressure successfully loaded, remapped and averaged.")
     
+
     def compute_net_TOA(self):
+        """
+        Computes Net TOA fluxes (all-sky and clear-sky) and adds them to the dataset.
+        """
         print('Creating Net TOA variables')
         self.ds['net_toa'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut'] #net_toa_allsky
         self.ds['net_toa_cs'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs'] #net_toa_clr
@@ -553,16 +672,16 @@ class Experiment:
     
     def check_albedo(self) -> None:
         """
-        Checks if the albedo is loaded.
+        Checks if the albedo is loaded. If not, tries to compute it from rsus and rsds. 
+        If neither is available, raises an error.
         """
-
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
     
         if 'alb' in self.ds.data_vars:
             print('alb already in ds')
         else:
-            if 'rsus' and 'rsds' in self.ds:
+            if 'rsus' in self.ds and 'rsds' in self.ds:
                 print("Computing albedo from rsus and rsds")
                 albedo = self.ds['rsus']/self.ds['rsds']
                 self.ds['alb'] = albedo.where(albedo > 0., 0.)
@@ -575,9 +694,9 @@ class Experiment:
 
     def check_hus_log(self) -> None:
         """
-        Checks if hus_log is in ds.
+        Checks if hus_log is in ds. If not, applies log to hus and adds it to the dataset, 
+        removing the original hus. Raises an error if hus is not available.
         """
-
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
     
@@ -592,7 +711,6 @@ class Experiment:
         """
         Converts specific humidity to water vapor vmr (in ppm).
         """
-
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
     
@@ -605,11 +723,17 @@ class Experiment:
             del self.ds['hus']
 
 
-    def check_vars(self, variables = STD_VARS_LOGQ) -> None:
+    def check_vars(self, variables: set[str] | list[str] | tuple[str] = STD_VARS_LOGQ) -> None:
         """
-        Checks if all variables needed are loaded. 
-        """
+        Checks if all variables needed are loaded. If some are missing, 
+        tries to compute them from available variables (e.g., rsutcs from rsntcs and rsdt, or rlutcs from rlntcs). 
+        If some variables are still missing after the computations, raises an error.
 
+        Parameters
+        ----------
+        variables
+            The set of variables that are required for the feedback calculations. Defaults to `STD_VARS_LOGQ`.
+        """
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
         
@@ -643,11 +767,23 @@ class Experiment:
 
         self.variables = variables
     
-    def check_time_range(self, time_range = None):
-        if time_range:
+    def check_time_range(self, time_range: dict[str, Any] | None = None) -> None:
+        """
+        If a time range is specified in the configuration, selects only that period from the dataset.
+        
+        Parameters
+        ----------
+        time_range
+            Dictionary with 'start' and 'end' keys specifying the time slice to select.
+        """
+        if time_range is not None:
             self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
-
-    def check_spatial_range(self, lat_range = None, lon_range = None):
+        
+    def check_spatial_range(self, lat_range: dict[str, Any] | None = None, lon_range: dict[str, Any] | None = None) -> None:
+        """
+        If spatial ranges are specified, subsets the dataset geographically.
+        Handles longitude crossing the prime meridian (e.g., when start > end).
+        """
         if lat_range:
             print('Lat range to apply:', lat_range)
             self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
@@ -661,6 +797,9 @@ class Experiment:
                     self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
 
     def check_coords(self):
+        """
+        Checks and renames coordinates to standard names (e.g., time_counter → time, pressure_levels → plev).
+        """
         if not self.ds:
             raise ValueError('Remapped data not loaded (self.ds is empty)')
         
@@ -673,9 +812,17 @@ class Experiment:
         if rename_coords:
             self.ds = self.ds.rename(rename_coords)
 
-    def compute_clim(self, time_range = None, compute = True):
+    def compute_clim(self, time_range: dict[str, str] | None = None, compute: bool = True) -> None:
         """
         Computes climatology. If time_range is provided, select a period.
+
+        Parameters
+        ----------
+        time_range
+            Dictionary with 'start' and 'end' keys specifying the time slice 
+            to consider before computing the mean.
+        compute
+            If True, explicitly computes the Dask array into memory.
         """
         self.ds_clim = compute_climatology(self.ds, time_range=time_range)
 
@@ -683,9 +830,19 @@ class Experiment:
             self.ds_clim = self.ds_clim.compute()
 
 
-    def compute_runmean(self, window_years = 21, time_range = None, compute = True):
+    def compute_runmean(self, window_years: int = 21, time_range: dict[str, str] | None = None, compute: bool = True) -> None:
         """
-        Computes running mean of dataset.
+        Computes the running mean of the experiment's dataset.
+
+        Parameters
+        ----------
+        window_years
+            Number of years used for the running mean window.
+        time_range
+            Dictionary with 'start' and 'end' keys specifying the time slice 
+            to consider before computing the mean.
+        compute
+            If True, explicitly computes the Dask array into memory.
         """
         self.ds_clim = compute_running_mean(self.ds, window_years=window_years, time_range = time_range)
 
@@ -693,11 +850,16 @@ class Experiment:
             self.ds_clim = self.ds_clim.compute()
 
 
-    def compute_anom_clim(self, control):
+    def compute_anom_clim(self, control: Experiment) -> None:
         """
         Removes monthly climatology from a control run.
-        """
 
+        Parameters
+        ----------
+        control
+            An instance of the Experiment class representing the control run, 
+            which must have its climatology already computed and stored in `control.ds_clim`.
+        """
         from importlib.util import find_spec
     
         if find_spec("flox") is not None:
@@ -709,18 +871,27 @@ class Experiment:
             self.ds_anom = self.ds - expand_clim(control.ds_clim, self.ds)
 
 
-    def compute_anom_aligned(self, control):
+    def compute_anom_aligned(self, control: Experiment) -> None:
         """
-        Removes climatology from a control run, aligning the time axis (experiment and climatology need to have the same length!).
-        """
+        Removes climatology from a control run, aligning the time axis 
+        (experiment and climatology need to have the same length!).
 
+        Parameters
+        ----------
+        control
+            An instance of the Experiment class representing the control run. 
+            The time axis of `control.ds_clim`
+        """
         check_time_axis(self.ds, control.ds_clim)
         clim_aligned = control.ds_clim.drop("time")
         clim_aligned["time"] = self.ds["time"]
         self.ds_anom = self.ds - clim_aligned
         
     
-    def check_lazy_loading(self):
+    def check_lazy_loading(self) -> None:
+        """
+        Checks if the dataset is lazily loaded (i.e., backed by Dask arrays) and prints a warning if it is not.
+        """
         check_lazy_loading(self.ds)
         
  
@@ -729,7 +900,7 @@ class Experiment:
             f"Experiment(\n"
             f"  name      = {self.name!r}\n"
             f"  variables (raw) = {self.raw_variables}\n"
-            f"  variables = {self.variables}\n"
+            f"  variables = {getattr(self, 'variables', 'Not checked yet')}\n"
             f"  remap_dir  = {self.remap_dir}\n"
             f"  raw_data = {len(self.raw_data)} DataArray(s)\n"
             f"  ds    = {list(self.ds.data_vars)}\n"
@@ -739,10 +910,24 @@ class Experiment:
         )
 
 
-def expand_clim(ds_clim, ds):
+def expand_clim(ds_clim: xr.Dataset, ds: xr.Dataset) -> xr.Dataset:
     """
-    Expand a climatology along the time axis (to avoid groupby).
-    without Flox, the groupby creates: PerformanceWarning: Slicing with an out-of-order index is generating 165 times more chunks
+    Expands a climatology along the time axis to match a target dataset.
+
+    This avoids using `groupby`, which without Flox can create performance 
+    warnings (e.g., slicing with out-of-order index generating massive chunk counts).
+
+    Parameters
+    ----------
+    ds_clim
+        The climatology dataset (must have a 'month' coordinate).
+    ds
+        The target dataset supplying the target 'time' axis.
+
+    Returns
+    -------
+    expanded
+        The climatology expanded along the full time axis of `ds`.
     """
     # Build a month coordinate from your data's time axis
     months = ds.time.dt.month
@@ -753,9 +938,22 @@ def expand_clim(ds_clim, ds):
     return expanded
 
 
-def compute_climatology(ds, time_range = None):
+def compute_climatology(ds: xr.Dataset, time_range: dict[str, str] | None = None) -> xr.Dataset:
     """
-    Computes climatology. If time_range is provided, select a period.
+    Computes the monthly climatology of a dataset.
+
+    Parameters
+    ----------
+    ds
+        The input dataset.
+    time_range
+        Dictionary with 'start' and 'end' keys specifying the time slice 
+        to consider before computing the mean. If None, uses the whole time axis.
+
+    Returns
+    -------
+    ds_clim
+        The monthly climatology dataset.
     """
     if time_range is not None:
         ds_clim = ds.sel(time=slice(time_range['start'], time_range['end']))
@@ -767,9 +965,24 @@ def compute_climatology(ds, time_range = None):
     return ds_clim
 
 
-def compute_running_mean(ds, window_years = 21, time_range = None):
+def compute_running_mean(ds: xr.Dataset, window_years: int = 21, time_range: dict[str, str] | None = None) -> xr.Dataset:
     """
-    Computes running mean of dataset.
+    Computes the running mean of a dataset. 
+    Assumes the dataset has monthly temporal resolution.
+
+    Parameters
+    ----------
+    ds
+        The input dataset.
+    window_years
+        Number of years for the rolling window.
+    time_range
+        Dictionary with 'start' and 'end' keys to subset the data before computation.
+
+    Returns
+    -------
+    ds_clim
+        The dataset smoothed with a running mean.
     """
     if time_range is not None:
         ds_clim = ds.sel(time=slice(time_range['start'], time_range['end']))
@@ -779,22 +992,25 @@ def compute_running_mean(ds, window_years = 21, time_range = None):
     return ds_clim
 
 
-def compute_anomalies(exp, control, method="climatology", window_years=21, time_range_clim = None):
+def compute_anomalies(exp: Experiment, control: Experiment, method: Literal["climatology", "running_mean"] = "climatology", window_years: int = 21, time_range_clim: dict[str, str] | None = None) -> None:
     """
-    Compute anomalies between a variable and its climatology/reference.
+    Computes anomalies for an experiment against a control reference.
 
     Parameters
     ----------
-    exp : Experiment instance for 4x
-    control : Experiment instance for picontrol
-    method : str, default "monthly"
+    exp
+        Experiment instance (e.g., 4xCO2 run).
+    control
+        Experiment instance used as reference (e.g., piControl).
+    method
         Method for anomaly computation:
-        - "climatology"            : monthly averaged climatology to calculate the anomaly
-        - "running_mean"              : running mean climatology to calculate the anomaly 
-    window_years : int, default 21
-        Num of years used for running mean
+        - "climatology" : Subtracts the monthly averaged climatology.
+        - "running_mean" : Subtracts the running mean climatology.
+    window_years
+        Number of years used for the running mean (if method is "running_mean").
+    time_range_clim
+        Time slice to use for computing the control's reference climatology.
     """
-
     if method == "climatology":
         control.compute_clim(time_range = time_range_clim, compute = True)
         exp.compute_anom_clim(control)
@@ -806,9 +1022,6 @@ def compute_anomalies(exp, control, method="climatology", window_years=21, time_
         raise ValueError(f"Unknown anomaly method {method}")
 
 
-
-
-
 ################################################################################################
 
 def mytestfunction():
@@ -816,38 +1029,31 @@ def mytestfunction():
     return
 
 ###### INPUT/OUTPUT SECTION: load kernels, load data ######
-def load_spectral_kernel(cart_k: str):
+def load_spectral_kernel(cart_k: str) -> tuple[dict[tuple[str, str], xr.DataArray], None]:
     """
     Loads and preprocesses spectral kernels for further analysis.
 
     Spectral kernels are expected as monthly climatologies split into
     individual NetCDF files (01–12), for clear-sky and all-sky conditions.
     The function reconstructs a monthly kernel with dimension `month`
-    (NOT `time`), to ensure compatibility with downstream calls such as
-    `anoms.groupby('time.month') * kernel`.
+    (NOT `time`), ensuring compatibility with downstream anomaly computations.
 
     Parameters
     ----------
-    cart_k : str
-        Base path containing spectral kernel subdirectories:
-        - clear_sky_fluxes/
-        - all_sky_fluxes/
-
-    version : str, optional
-        Kernel version string (default: "v3").
+    cart_k
+        Base path containing spectral kernel subdirectories ('clear_sky_fluxes/' 
+        and 'all_sky_fluxes/').
 
     Returns
     -------
-    allkers : dict
-        Dictionary with keys (tip, variable), where:
-        - tip      ∈ {"clr", "cld"}
-        - variable ∈ {"t", "ts", "wv_lw"}
-
-        Each value is an xarray DataArray with dimension `month`.
+    allkers
+        Dictionary mapping `(tip, variable)` to an xarray.DataArray with a `month` dimension.
+        - `tip` ∈ {"clr", "cld"}
+        - `variable` ∈ {"t", "ts", "wv_lw"}
+    None
+        Placeholder for the `dp` (pressure thickness) variable, which is not 
+        returned by this specific loader.
     """
-
-
-    # mapping: filename tag → (output tag, subdirectory)
     tips = {
         "clear": ("clr", "clear_sky_fluxes_use"),
         "cloudy":   ("cld", "all_sky_fluxes_use"),
@@ -899,36 +1105,29 @@ def load_spectral_kernel(cart_k: str):
     return allkers, None # no dp
 
 
-def load_kernel_ERA5(cart_k, finam):
+def load_kernel_ERA5(cart_k: str, finam: str) -> tuple[dict[tuple[str, str], xr.DataArray], xr.DataArray]:
     """
-    Loads and preprocesses ERA5 kernels for further analysis.
+    Loads and preprocesses ERA5 radiative kernels
 
-    This function reads NetCDF files containing ERA5 kernels for various variables and conditions 
-    (clear-sky and all-sky), renames the coordinates for compatibility with the Xarray data model, 
-    and saves the preprocessed results as pickle files.
-
-    Parameters:
-    -----------
-    cart_k : str
+    Parameters
+    ----------
+    cart_k
         Path to the directory containing the ERA5 kernel NetCDF files.
-        Files should follow the naming format `ERA5_kernel_{variable}_TOA.nc`.
+    finam 
+        Filename template, e.g. `ERA5_kernel_{}_TOA.nc`.
 
-    finam : str
-        naming format `ERA5_kernel_{variable}_TOA.nc`
+    Returns
+    -------
+    allkers
+        A dictionary containing the preprocessed kernels. Keys are tuples `(tip, variable)`.
+    dp
+        The pressure levels difference (`dp`).
 
-    Returns:
-    --------
-    allkers : dict
-        A dictionary containing the preprocessed kernels. The dictionary keys are tuples of the form `(tip, variable)`, where:
-        - `tip`: Atmospheric condition ('clr' for clear-sky, 'cld' for all-sky).
-        - `variable`: Name of the variable (`'t'` for temperature, `'ts'` for surface temperature, `'wv_lw'`, `'wv_sw'`, `'alb'`).
-
-        Notes:
-    ------
+    Notes
+    -----
     - The NetCDF kernel files must be organized as `ERA5_kernel_{variable}_TOA.nc` and contain 
       the fields `TOA_clr` and `TOA_all` for clear-sky and all-sky conditions, respectively.
     - This function uses the Xarray library to handle datasets and Pickle to save processed data.
-
     """
     vnams = ['ta_dp', 'ts', 'wv_lw_dp', 'wv_sw_dp', 'alb']
     tips = ['clr', 'cld']
@@ -954,35 +1153,30 @@ def load_kernel_ERA5(cart_k, finam):
                 stef=ker.TOA_all
             allkers[(tip, vna)] = stef.assign_coords(month = np.arange(1, 13))
 
-    
     vlevs = xr.load_dataset( cart_k+'dp_era5.nc')
     vlevs=vlevs.rename({'level': 'plev', 'latitude': 'lat', 'longitude': 'lon'})
 
     return allkers, vlevs.dp
 
 
-def load_kernel_HUANG(cart_k, finam):
+def load_kernel_HUANG(cart_k: str, finam: str) -> tuple[dict[tuple[str, str], xr.DataArray], xr.DataArray]:
     """
-    Loads and processes climate kernel datasets (from HUANG 2017), and saves specific datasets to pickle files.
+    Loads and processes Huang (2017) climate kernel datasets.
 
-    Parameters:
-    -----------
-    cart_k : str
-        Path template to the kernel dataset files. 
-        Placeholders should be formatted as `{}` to allow string formatting.
-        
-    finam : str
-        naming format `RRTMG_{}_toa_{}_highR.nc` 
+    Parameters
+    ----------
+    cart_k
+        Directory path containing the kernel NetCDF files.
+    finam
+        Filename template containing two placeholders: one for the variable 
+        and one for the sky condition (e.g., 'huang_kernel_{}_{}.nc').
 
-    Returns:
-    --------
-    allkers : dict
-        A dictionary containing the preprocessed kernels. The dictionary keys are tuples of the form `(tip, variable)`, where:
-        - `tip`: Atmospheric condition ('clr' for clear-sky, 'cld' for all-sky).
-        - `variable`: Name of the variable (`'t'` for temperature, `'ts'` for surface temperature, `'wv_lw'`, `'wv_sw'`, `'alb'`).
-
-    
-    
+    Returns
+    -------
+    allkers
+        Dictionary mapping `(tip, variable)` to an xarray.DataArray.
+    dp
+        The pressure thickness layers from the 'dp.nc' file.
     """
     vnams = ['t', 'ts', 'wv_lw', 'wv_sw', 'alb']
     tips = ['clr', 'cld']
@@ -1011,35 +1205,25 @@ def load_kernel_HUANG(cart_k, finam):
     return allkers, vlevs.dp
 
 
-def load_kernel(ker, cart_k, finam=None):
+def load_kernel(ker: str, cart_k: str, finam: str | None = None) -> tuple[dict[tuple[str, str], xr.DataArray], xr.DataArray | None]:
     """
-    Selects and loads radiative kernels from different sources: ERA5, HUANG, and SPECTRAL.
+    Selects and loads radiative kernels from specified sources.
 
-    Parameters:
-    -----------
-    ker : str
-        Identifier of the kernel dataset to load.
-        Supported values:
-        - `'ERA5'`     : Loads kernels using `load_kernel_ERA5`.
-        - `'HUANG'`    : Loads kernels using `load_kernel_HUANG`.
-        - `'SPECTRAL'` : Loads spectrally resolved kernels using
-                         `load_spectral_kernel`.
+    Parameters
+    ----------
+    ker
+        Identifier of the kernel dataset ('ERA5', 'HUANG', or 'SPECTRAL').
+    cart_k
+        Directory path containing the kernel files.
+    finam
+        Filename pattern with placeholders. Required for ERA5 and HUANG.
 
-    cart_k : str
-        Path to the directory containing the kernel NetCDF files for the
-        selected dataset.
-
-    finam : str
-        Filename pattern used to locate the kernel files. It must include
-        a formatting placeholder (e.g., `'ERA5_kernel_{}_TOA.nc'`,
-        `'spectral_kernel_ste_{}.nc'`) that will be filled with the
-        variable name or kernel type.
-
-    Returns:
-    --------
-    allkers : dict
-        A dictionary containing the kernels. Keys are: `(tip, variable)`.
-        .
+    Returns
+    -------
+    allkers
+        Dictionary containing the kernels.
+    dp
+        The width of the atmospheric layers, or None if not provided by the kernel.
     """
     if ker == 'ERA5':
         return load_kernel_ERA5(cart_k, finam)
@@ -1054,9 +1238,21 @@ def load_kernel(ker, cart_k, finam=None):
 
 #################################################################################################
 
-def load_config(config_file, variable_mapping_file = None):
+def load_config(config_file: str | Path, variable_mapping_file: str | Path | None = None) -> dict[str, Any]:
     """
-    Loads the configuration from config_file, returns a dict. Creates output directory.
+    Loads and validates the configuration from a YAML file.
+
+    Parameters
+    ----------
+    config_file
+        Path to the main YAML configuration file.
+    variable_mapping_file
+        Optional path to a YAML file mapping variable names.
+
+    Returns
+    -------
+    config
+        Parsed configuration dictionary.
     """
     
     with open(config_file, 'r') as file:
@@ -1078,6 +1274,8 @@ def load_config(config_file, variable_mapping_file = None):
     # config['exp_name'] = exp_name
     
     cart_out = config['file_paths'].get("output")
+    if not cart_out:
+        raise ValueError("Key 'output' missing in 'file_paths' configuration.")
     ## Create dirs
     cart_out_exp = cart_out + f'/{exp_name}/'
     os.makedirs(cart_out_exp, exist_ok=True)
@@ -1090,18 +1288,18 @@ def load_config(config_file, variable_mapping_file = None):
     
     config["anomaly_method"] = method
 
-    #### qui mkdir e cart_out differenziate
+    
     use_atm_mask=config.get("use_atm_mask", True)
     save_pattern = config.get("save_pattern", False)
     
-    config['use_atm_mask'] = bool(use_atm_mask)
-    config['save_pattern'] = bool(save_pattern)
+    config['use_atm_mask'] = bool(config.get("use_atm_mask", True))
+    config['save_pattern'] = bool(config.get("save_pattern", False))
     config['num_year_regr'] = config.get("num_year_regr", 10)
+    config['num_running_years_trend'] = config.get("num_running_years_trend", 21)
 
-    # Read time ranges from config
+   
     time_range_clim = config.get("time_range_clim", {})
     time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
     time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
     time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     
@@ -1115,12 +1313,11 @@ def load_config(config_file, variable_mapping_file = None):
     config['lat_range']=lat_range
     config['lon_range']=lon_range
 
-    # Surface pressure management
+   
     config['pressure_path'] = config['file_paths'].get('pressure_data', None)
 
-    # Load variable mapping for non-CMOR names
     if variable_mapping_file is not None:
-        variable_map = load_variable_mapping(variable_mapping_file, config['exp_name'])['rename_map']
+        variable_map = load_variable_mapping(variable_mapping_file, config['exp_name']).get('rename_map')
         config['variable_mapping'] = variable_map
     else:
         config['variable_mapping'] = None
@@ -1128,14 +1325,43 @@ def load_config(config_file, variable_mapping_file = None):
     return config
 
 
-def preprocess_data(config_file, ker = "HUANG", raw_variables = STD_VARS_NOALB, save_remapped = True, variable_mapping_file = None, control_file_dict = None, exp_file_dict = None, wv_method_spectral = 'hybrid', exp_name = None):
+def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: set[str] | list[str] | tuple[str] = STD_VARS_NOALB, save_remapped: bool = True, variable_mapping_file: str | Path | None = None, control_file_dict: dict | None = None, exp_file_dict: dict | None = None, wv_method_spectral: str = 'hybrid', exp_name: str | None = None) -> tuple[Experiment, Experiment, Kernel]:
     """
-    All the preprocessing needed before calling the feedback calculations:
-        - Reads experiment, control and kernels;
-        - Remaps to kernel resolution;
-        - Computes climatology;
-        - Computes anomalies;
-        - Computes width of atm layers for kernel;
+    Orchestrates the data preparation sequence before feedback calculation.
+
+    Steps include loading config, reading kernel/control/experiment data, 
+    remapping to kernel resolution, and computing climatologies/anomalies.
+
+    Parameters
+    ----------
+    config_file
+        Path to the configuration YAML file.
+    ker
+        Kernel identifier.
+    raw_variables
+        Variables to extract from the raw datasets.
+    save_remapped
+        If True, saves remapped intermediate NetCDF files to disk.
+    variable_mapping_file
+        Path to a variable mapping YAML file.
+    control_file_dict
+        Optional pre-loaded dictionary of control files.
+    exp_file_dict
+        Optional pre-loaded dictionary of experiment files.
+    wv_method_spectral : str, default 'hybrid'
+        Method used for the water vapor spectral kernel calculation.
+    exp_name : str, optional
+        Name of the experiment. If provided, overrides the configuration 
+        and sets specific output directories.
+
+    Returns
+    -------
+    control
+        The processed control `Experiment` object.
+    experiment
+        The processed forced `Experiment` object.
+    kernel
+        The loaded `Kernel` object.
     """
     
     # load config
@@ -1223,8 +1449,21 @@ def main_loop(config_file, ker = 'HUANG'):
 ###############################################################################################
 
 
-def check_lazy_loading(ds):
-    """Quick diagnostic for lazy loading status"""
+def check_lazy_loading(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Checks the lazy-loading status of an xarray Dataset.
+    If chunking is problematic, unifies chunks and returns the fixed dataset.
+
+    Parameters
+    ----------
+    ds
+        The dataset to inspect.
+        
+    Returns
+    -------
+    ds
+        The original dataset, or the chunk-unified dataset if errors were caught.
+    """
     import dask.array as da
     
     print("=== Lazy Loading Status ===")
@@ -1246,22 +1485,34 @@ def check_lazy_loading(ds):
         ds = xr.unify_chunks(ds)
         print(f"\nChunk structure:\n{ds.chunks}")
 
-    return
+    return ds
 
-
-def load_variable_mapping(configvar_file, dataset_type):
+def load_variable_mapping(configvar_file: str | Path, dataset_type: str) -> dict[str, Any]:
     """Load variable mappings for the specified dataset type from YAML."""
     with open(configvar_file, 'r') as file:
         config = yaml.safe_load(file)
     return config.get(dataset_type, {})
 
-
-def check_time_axis(ds, piok):
+def check_time_axis(ds: xr.Dataset, piok: xr.Dataset) -> None:
+    """Ensures two datasets share the same length along the time dimension."""
     if len(ds["time"]) != len(piok["time"]):
         raise ValueError("Error: The 'time' columns in 'ds' and 'piok' must have the same length. To fix use variable 'time_range' of the function")
     return
 
-def check_vertical(da):
+def check_vertical(da: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+    """
+    Inspects vertical coordinates and converts from Pascals to hPa if needed.
+    
+    Parameters
+    ----------
+    da
+        Dataset or DataArray containing a 'plev' coordinate.
+
+    Returns
+    -------
+    da
+        Object with corrected 'plev' units.
+    """
     plev = da.coords["plev"]
     #units = plev.attrs.get("units")
  
@@ -1277,7 +1528,10 @@ def check_vertical(da):
 
     return da
 
-def preproc(ds):
+def preproc(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Standardizes coordinate names and rounds grid definitions to avoid float errors.
+    """
     rename_coords = {}
     if 'time_counter' in ds.dims or 'time_counter' in ds.coords:
         rename_coords['time_counter'] = 'time'
@@ -1294,24 +1548,24 @@ def preproc(ds):
     return ds
 
 ######################################################################################
-#### 
 
-##tropopause computation (Reichler 2003) 
-def mask_strato(ta):
+def mask_strato(ta: xr.DataArray) -> xr.DataArray:
     """
-    Generates a mask for atmospheric temperature data based on the lapse rate threshold.
-    as in (Reichler 2003) 
+    Generates a mask for atmospheric temperature data based on the lapse rate threshold,
+    following Reichler et al. (2003).
 
-    Parameters:
-    -----------
-    ta: xarray.DataArray
-    Atmospheric temperature dataset with pressure levels ('plev') as a coordinate. 
+    The lapse rate $\Gamma$ is calculated between adjacent pressure levels.
 
-    Returns:
-    --------
-    mask : xarray.DataArray
+    Parameters
+    ----------
+    ta
+        Atmospheric temperature dataset with pressure levels ('plev') as a coordinate. 
+
+    Returns
+    -------
+    mask
         A mask array where:
-        - Values are 1 where the lapse rate (`laps`) is less than or equal to -2 K/km.
+        - Values are 1 where the lapse rate is less than or equal to -2 K/km.
         - Values are NaN elsewhere.
     """
     p=ta.plev
@@ -1353,165 +1607,164 @@ def mask_strato(ta):
         
     return mask
 
-### Mask for surf pressure
-def mask_pres(surf_pressure, cart_out:str, allkers, config_file=None):
-    """
-    Computes a "width mask" for atmospheric pressure levels based on surface pressure and kernel data.
+# def mask_pres(surf_pressure: xr.Dataset, cart_out: str, allkers: dict[tuple[str, str], xr.DataArray], config_file: str | None = None) -> xr.DataArray:
+#     """
+#     Computes a "width mask" for atmospheric pressure levels based on surface pressure and kernel data.
 
-    The function determines which pressure levels are above or below the surface pressure (`ps`) 
-    and generates a mask that includes NaN values for levels below the surface pressure and 
-    interpolated values near the surface. It supports kernels from HUANG and ERA5 datasets.
+#     The function determines which pressure levels are above or below the surface pressure (`ps`) 
+#     and generates a mask that includes NaN values for levels below the surface pressure and 
+#     interpolated values near the surface.
 
-    Parameters:
-    -----------
-    surf_pressure : xr.Dataset
-        - An xarray dataset containing surface pressure (`ps`) values.
-          The function computes a climatology based on mean monthly values.
-        - If a string (path) is provided, the corresponding NetCDF file(s) are loaded.
+#     Parameters
+#     ----------
+#     surf_pressure
+#         An xarray dataset containing surface pressure (`ps`) values, or a string path to NetCDF file(s).
+#     cart_out
+#         Path to the directory where outputs are saved.
+#     allkers
+#         Dictionary containing radiative kernels for different conditions.
+#     vlevs
+#         The dataset or data array containing the pressure levels (`plev`) and layer thicknesses (`dp`).
+#         (Must be passed in memory to avoid missing pickle file errors).
+#     config_file
+#         Optional path to configuration YAML file, required if `surf_pressure` is a path.
 
-    cart_out : str
-        Path to the directory where processed kernel files (e.g., 'kHUANG.p', 'kERA5.p', 'vlevsHUANG.p', 'vlevsERA5.p') 
-        are stored or will be saved.
+#     Returns
+#     -------
+#     wid_mask
+#         A mask indicating the vertical pressure distribution for each grid point. 
+#     """
+#     # MODIFIED TO WORK BOTH WITH ARRAY AND FILE
+#     k = allkers[('cld', 't')]
+#     vlevs = pickle.load(open(os.path.join(cart_out, 'vlevs_HUANG.p'), 'rb'))
 
-    allkers  : dict
-        Dictionary containing radiative kernels for different conditions (e.g., 'clr', 'cld').    
+#     # If surf_pressure is an array:
+#     if isinstance(surf_pressure, xr.Dataset):
+#         psclim = surf_pressure.groupby('time.month').mean(dim='time')
+#         psye = psclim['ps'].mean('month')
 
-    Returns:
-    --------
-    wid_mask : xarray.DataArray
-        A mask indicating the vertical pressure distribution for each grid point. 
-        Dimensions depend on the kernel data and regridded surface pressure:
-        - For HUANG: [`plev`, `lat`, `lon`]
-        - For ERA5: [`plev`, `month`, `lat`, `lon`]
-
-    Notes:
-    ------
-    - Surface pressure (`ps`) climatology is computed as the mean monthly values over all available time steps.
-    - `wid_mask` includes NaN values for pressure levels below the surface and interpolated values for the 
-      level nearest the surface.
-    - For HUANG kernels, the `dp` (pressure thickness) values are directly used. For ERA5, the monthly mean `dp` is used.
-
-    Dependencies:
-    -------------
-    - Xarray for dataset handling and computations.
-    - Numpy for array manipulations.
-    - Custom library `ctl` for regridding datasets.
-    """
-
-    # MODIFIED TO WORK BOTH WITH ARRAY AND FILE
-    k = allkers[('cld', 't')]
-    vlevs = pickle.load(open(os.path.join(cart_out, 'vlevs_HUANG.p'), 'rb'))
-
-    # If surf_pressure is an array:
-    if isinstance(surf_pressure, xr.Dataset):
-        psclim = surf_pressure.groupby('time.month').mean(dim='time')
-        psye = psclim['ps'].mean('month')
-
-    # If surf_pressure is a path, open config_file
-    elif isinstance(surf_pressure, str):
-        if pressure_path is None:
-            if config_file is None:
-                raise ValueError("config_file must be provided when surf_pressure is a directory.")
-            with open(config_file, 'r') as f:
-                config = yaml.safe_load(f)
-            pressure_path = config["file_paths"].get("pressure_data", None)
+#     # If surf_pressure is a path, open config_file
+#     elif isinstance(surf_pressure, str):
+#         if pressure_path is None:
+#             if config_file is None:
+#                 raise ValueError("config_file must be provided when surf_pressure is a directory.")
+#             with open(config_file, 'r') as f:
+#                 config = yaml.safe_load(f)
+#             pressure_path = config["file_paths"].get("pressure_data", None)
     
-        if not pressure_path:
-            raise ValueError("No pressure_data path specified in the configuration file, but surf_pressure was given as a path.")
+#         if not pressure_path:
+#             raise ValueError("No pressure_data path specified in the configuration file, but surf_pressure was given as a path.")
 
-        ps_files = sorted(glob.glob(pressure_path))  
-        if not ps_files:
-            raise FileNotFoundError(f"No matching files found for pattern: {pressure_path}")
+#         ps_files = sorted(glob.glob(pressure_path))  
+#         if not ps_files:
+#             raise FileNotFoundError(f"No matching files found for pattern: {pressure_path}")
 
-        ps = xr.open_mfdataset(ps_files, combine='by_coords')
+#         ps = xr.open_mfdataset(ps_files, combine='by_coords')
 
-        # Check that 'ps' exists
-        if 'ps' not in ps:
-            raise KeyError("The dataset does not contain the expected 'ps' variable.")
+#         # Check that 'ps' exists
+#         if 'ps' not in ps:
+#             raise KeyError("The dataset does not contain the expected 'ps' variable.")
 
-        # Convert time variable to datetime if necessary
-        if not np.issubdtype(ps['time'].dtype, np.datetime64):
-            ps = ps.assign_coords(time=pd.to_datetime(ps['time'].values))
+#         # Convert time variable to datetime if necessary
+#         if not np.issubdtype(ps['time'].dtype, np.datetime64):
+#             ps = ps.assign_coords(time=pd.to_datetime(ps['time'].values))
     
-        # Resample to monthly and calculate climatology
-        ps_monthly = ps.resample(time='M').mean()
-        psclim = ps_monthly.groupby('time.month').mean(dim='time')
-        psye = psclim['ps'].mean('month')
+#         # Resample to monthly and calculate climatology
+#         ps_monthly = ps.resample(time='M').mean()
+#         psclim = ps_monthly.groupby('time.month').mean(dim='time')
+#         psye = psclim['ps'].mean('month')
    
-    else:
-        raise TypeError("surf_pressure must be an xarray.Dataset or a path to NetCDF files.")
+#     else:
+#         raise TypeError("surf_pressure must be an xarray.Dataset or a path to NetCDF files.")
 
-    psmax = float(psye.max())
-    if psmax > 2000:     # likely Pa
-        psye = psye / 100.0
-    psye_rg = ctl.regrid_dataset(psye, k.lat, k.lon).compute()
-    wid_mask = np.empty([len(vlevs.plev)] + list(psye_rg.shape))
+#     psmax = float(psye.max())
+#     if psmax > 2000:     # likely Pa
+#         psye = psye / 100.0
+#     psye_rg = ctl.regrid_dataset(psye, k.lat, k.lon).compute()
+#     wid_mask = np.empty([len(vlevs.plev)] + list(psye_rg.shape))
 
-    for ila in range(len(psye_rg.lat)):
-        for ilo in range(len(psye_rg.lon)):
-            ind = np.where((psye_rg[ila, ilo].values - vlevs.plev.values) > 0)[0][0]
-            wid_mask[:ind, ila, ilo] = np.nan
-            wid_mask[ind, ila, ilo] = psye_rg[ila, ilo].values - vlevs.plev.values[ind]
-            wid_mask[ind+1:, ila, ilo] = vlevs.dp.values[ind+1:]
+#     for ila in range(len(psye_rg.lat)):
+#         for ilo in range(len(psye_rg.lon)):
+#             ind = np.where((psye_rg[ila, ilo].values - vlevs.plev.values) > 0)[0][0]
+#             wid_mask[:ind, ila, ilo] = np.nan
+#             wid_mask[ind, ila, ilo] = psye_rg[ila, ilo].values - vlevs.plev.values[ind]
+#             wid_mask[ind+1:, ila, ilo] = vlevs.dp.values[ind+1:]
         
 
-    wid_mask = xr.DataArray(wid_mask, dims = k.dims[1:], coords = k.drop('month').coords)
-    return wid_mask
+#     wid_mask = xr.DataArray(wid_mask, dims = k.dims[1:], coords = k.drop('month').coords)
+#     return wid_mask
 
 ###################################################
 
-def pliq(T):
-    pliq = 0.01 * np.exp(54.842763 - 6763.22 / T - 4.21 * np.log(T) + 0.000367 * T + np.tanh(0.0415 * (T - 218.8)) * (53.878 - 1331.22 / T - 9.44523 * np.log(T) + 0.014025 * T))
-    return pliq
+# def pliq(T: float | np.ndarray) -> float | np.ndarray:
+#     """
+#     Computes the saturation vapor pressure over liquid water.
+#     """
+#     pliq = 0.01 * np.exp(54.842763 - 6763.22 / T - 4.21 * np.log(T) + 0.000367 * T + np.tanh(0.0415 * (T - 218.8)) * (53.878 - 1331.22 / T - 9.44523 * np.log(T) + 0.014025 * T))
+#     return pliq
 
-def pice(T):
-    pice = np.exp(9.550426 - 5723.265 / T + 3.53068 * np.log(T) - 0.00728332 * T) / 100.0
-    return pice
+# def pice(T: float | np.ndarray) -> float | np.ndarray:
+#     """
+#     Computes the saturation vapor pressure over ice.
+#     """
+#     pice = np.exp(9.550426 - 5723.265 / T + 3.53068 * np.log(T) - 0.00728332 * T) / 100.0
+#     return pice
 
-def dlnws_old(T):
-    """
-    Calculates 1/(dlnq/dT_1K) using Huang et al. (2017) formulas.
-    """
-    pliq0 = pliq(T)
-    pice0 = pice(T)
+# def dlnws_old(T: float | np.ndarray) -> float | np.ndarray:
+#     """
+#     Calculates 1/(dlnq/dT_1K) using Huang et al. (2017) formulas.
+#     """
+#     pliq0 = pliq(T)
+#     pice0 = pice(T)
 
-    T1 = T + 1.0
-    pliq1 = pliq(T1)
-    pice1 = pice(T1)
+#     T1 = T + 1.0
+#     pliq1 = pliq(T1)
+#     pice1 = pice(T1)
     
-    # Use np.where to choose between pliq and pice based on the condition T >= 273
-    if isinstance(T, xr.DataArray):# and isinstance(T.data, da.core.Array):
-        print('qui')
-        ws = xr.where(T >= 273, pliq0, pice0)    # Dask equivalent of np.where is da.where
-        ws1 = xr.where(T1 >= 273, pliq1, pice1)
-    else:
-        print('qua')
-        ws = np.where(T >= 273, pliq0, pice0)
-        ws1 = np.where(T1 >= 273, pliq1, pice1)
+#     # Use np.where to choose between pliq and pice based on the condition T >= 273
+#     if isinstance(T, xr.DataArray):# and isinstance(T.data, da.core.Array):
+#         print('qui')
+#         ws = xr.where(T >= 273, pliq0, pice0)    # Dask equivalent of np.where is da.where
+#         ws1 = xr.where(T1 >= 273, pliq1, pice1)
+#     else:
+#         print('qua')
+#         ws = np.where(T >= 273, pliq0, pice0)
+#         ws1 = np.where(T1 >= 273, pliq1, pice1)
     
-    # Calculate the inverse of the derivative dws
-    dws = ws / (ws1 - ws)
+#     # Calculate the inverse of the derivative dws
+#     dws = ws / (ws1 - ws)
 
-    if isinstance(dws, np.ndarray):
-        dws = ctl.transform_to_dataarray(T, dws, 'dlnws')
+#     if isinstance(dws, np.ndarray):
+#         dws = ctl.transform_to_dataarray(T, dws, 'dlnws')
    
-    return dws
+#     return dws
 
 
-def q2(e, p = 1e3):
+def q2(e: float | np.ndarray | xr.DataArray, p: float | np.ndarray | xr.DataArray = 1e3) -> float | np.ndarray | xr.DataArray:
     """
-    Saturation specific humidity, given saturation vapor pressure and P (in hPa).
+    Computes saturation specific humidity given saturation vapor pressure and pressure.
+
+    Parameters
+    ----------
+    e
+        Saturation vapor pressure (hPa).
+    p
+        Atmospheric pressure (hPa). Defaults to 1000 hPa.
     """
     return 0.622*e/(p - 0.378*e)
 
 
-def calc_qsat(temp, pres = 1.e3):
+def calc_qsat(temp: float | np.ndarray | xr.DataArray, pres: float | np.ndarray | xr.DataArray = 1.e3) -> float | np.ndarray | xr.DataArray:
     """
-    Computes the saturation specific humidity.
-    temp in K
-    pres in hPa
-    """
+    Computes the saturation specific humidity using simplified WMO formulas.
 
+    Parameters
+    ----------
+    temp
+        Temperature (K).
+    pres
+        Pressure (hPa). Defaults to 1000 hPa.
+    """
     # Following Murphy and Koop 2005
     # ew = 0.01*np.exp(54.842763 - 6763.22/T - 4.210*np.log(T) + 0.000367*T + np.tanh(0.0415*(T - 218.8)) * (53.878 - 1331.22/T - 9.44523*np.log(T) + 0.014025*T))
     # ei = 0.01*np.exp(9.550426 - 5723.265/T + 3.53068*np.log(T) - 0.00728332*T)
@@ -1532,9 +1785,21 @@ def calc_qsat(temp, pres = 1.e3):
     return qsat
 
 
-def Kq_fact(temp, method, pres = None):
+def Kq_fact(temp: float | np.ndarray | xr.DataArray, method: str, pres: float | np.ndarray | xr.DataArray | None = None) -> float | np.ndarray | xr.DataArray:
     """
-    Factor used to normalize the water vapor kernel, which usually corresponds to a change in specific humidity due to an increase of atm temp by 1 K, keeping RH constant.
+    Computes the factor used to normalize the water vapor kernel.
+    
+    Usually corresponds to a change in specific humidity due to an increase 
+    of atmospheric temperature by 1 K, keeping relative humidity constant.
+
+    Parameters
+    ----------
+    temp
+        Atmospheric temperature data.
+    method
+        Methodology to use ('log', 'linear', or 'CC').
+    pres
+        Pressure levels (hPa). If None, extracted from `temp.plev`.
     """
     if pres is None:
         if isinstance(temp, xr.DataArray):
@@ -1561,20 +1826,26 @@ def Kq_fact(temp, method, pres = None):
 
 
 ############# SPATIAL PATTERN FUNCTION #############
-def regress_pattern_vectorized(feedback_data, gtas):
+def regress_pattern_vectorized(feedback_data: xr.DataArray, gtas: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
     """
-    Perform a linear regression between feedback_data (lat, lon, year) and gtas (year)
-    using xarray.apply_ufunc for efficient, vectorized computation.
+    Performs a linear regression between feedback spatial data and a global 
+    temperature anomaly index using `xarray.apply_ufunc` for parallelization.
 
-    Parameters:
-    - feedback_data (xr.DataArray): feedback values (time, lat, lon)
-    - gtas (xr.DataArray): global temperature anomaly over time (time,)
+    Parameters
+    ----------
+    feedback_data
+        Feedback values with dimensions (time, lat, lon).
+    gtas
+        Global temperature anomaly over time with dimension (time).
 
-    Returns:
-    - slope_map (xr.DataArray): slope (feedback pattern) for each lat/lon
-    - stderr_map (xr.DataArray): standard error of the regression slope for each lat/lon
+    Returns
+    -------
+    slope_map
+        The regression slope (feedback pattern) for each lat/lon point.
+    stderr_map
+        The standard error of the regression slope for each lat/lon point.
     """
-    def linregress_1d(y, x):
+    def linregress_1d(y: np.ndarray, x: np.ndarray) -> tuple[float, float]:
         # Remove NaNs
         mask = np.isfinite(x) & np.isfinite(y)
         x = x[mask] #gtas data
@@ -1624,14 +1895,27 @@ def regress_pattern_vectorized(feedback_data, gtas):
        
 # FUNCTION FOR WV ANOMALIES
 # From Mass mixing Ratio (kg/kg to ppmv)
-def q_to_ppmv(q_inp):
+def q_to_ppmv(q_inp: float | np.ndarray | xr.DataArray) -> float | np.ndarray | xr.DataArray:
+    """
+    Converts Mass Mixing Ratio (kg/kg) to parts per million by volume (ppmv).
+
+    Parameters
+    ----------
+    q_inp
+        Mass mixing ratio (kg/kg).
+        
+    Returns
+    -------
+    vw_ppmv
+        Mixing ratio in ppmv.
+    """
     Ma = 28.97  # Molecular weight of dry air
     Mw = 18.02  # Molecular weight of water vapor
     vw_ppmv = q_inp / (1 - q_inp) * (Ma / Mw) * 10**6
     return vw_ppmv
 
 
-def month_calc(anom, k):
+def month_calc(anom: xr.DataArray, k: xr.DataArray) -> xr.DataArray:
     """
     Performs the product between anom and k splitting by month instead than using groupby.
     """
@@ -1659,45 +1943,37 @@ def month_calc(anom, k):
 ############ RADIATIVE ANOMALY FUNCTIONS #############
 #PLANCK SURFACE
 
-def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
+def Rad_anomaly_planck_surf(experiment: Experiment, kernel: Kernel, cart_out: str, save_pattern: bool = False) -> dict[tuple[str, str], xr.DataArray]:
     """
     Compute the Planck surface radiation anomaly using climate model data and radiative kernels.
 
     Parameters
     ----------
-    experiment : object
-        Experiment object containing climate anomaly fields.
-        Must include:
-        - experiment.ds_anom['ts'] : surface temperature anomaly field
-          with dimensions including ``time`` and spatial coordinates.
-
-    kernel : object
-        Kernel object containing radiative kernels.
-        Must include:
-        - kernel.kernel[(tip, 'ts')] : surface temperature kernel
-          for each sky condition (`tip` = ``'clr'`` or ``'cld'``).
-
-    cart_out : str
+    experiment
+        Instance of the Experiment class containing the model datasets and anomalies.
+    kernel
+        Instance of the Kernel class containing the loaded radiative kernels.
+    cart_out
         Output directory where results will be saved.
-
-    save_pattern : bool, default False
+    save_pattern
         If True, save the full spatial anomaly patterns in addition to global means.
 
     Returns
     -------
-    dict
+    radiation
         Dictionary containing computed Planck surface radiation anomalies:
-        - ('clr', 'planck_surf') : clear-sky Planck surface anomaly
-        - ('cld', 'planck_surf') : all-sky Planck surface anomaly
+        - ('clr', 'planck-surf') : clear-sky Planck surface anomaly
+        - ('cld', 'planck-surf') : all-sky Planck surface anomaly
 
-    Saved Outputs
-    -------------
+    Saved Files
+    -----------
     - dRt_planck-surf_global_{tip}.nc
-    (global mean anomaly for each sky condition, `tip` = clr or cld)
+        Global mean of the Planck surface anomaly for each condition (clear/cloudy).
 
-    If `save_pattern=True`, also saves:
+    If `save_pattern` is True, also saves:
+
     - dRt_planck-surf_pattern_{tip}.nc
-    (full spatial anomaly field for each sky condition)
+        Full spatial pattern of the Planck surface anomaly for each condition (clear/cloudy).
     """
     radiation = dict()
     for tip in ['clr', 'cld']:
@@ -1739,52 +2015,46 @@ def Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern=False):
 
 #PLANK-ATMO AND LAPSE RATE WITH VARYING TROPOPAUSE
 
-def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True, save_pattern=False):
-
+def Rad_anomaly_planck_atm_lr(experiment: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False) -> dict[tuple[str, str], xr.DataArray]:
     """
     Computes atmospheric Planck and lapse-rate radiation anomalies using climate model data and radiative kernels.
 
     Parameters
     ----------
-    experiment : object
-        Climate experiment object containing anomaly fields.
-        Must include:
-        - experiment.ds_anom['ta'] : atmospheric temperature anomaly (3D: time, plev, space)
-        - experiment.ds_anom['ts'] : surface temperature anomaly
-        - experiment.ds['ta'] : raw atmospheric temperature field (used for masking)
-
-    kernel : object
-        Radiative kernel object.
-        Must include:
-        - kernel.kernel[(tip, 't')] : temperature kernel for each sky condition
-        - kernel.dp : pressure thickness weights (if required by kernel type)
-        - kernel.name : kernel type (e.g., 'SPECTRAL')
-    
-    cart_out : str
+    experiment
+        Instance of the Experiment class containing the model datasets and anomalies.
+    kernel
+        Instance of the Kernel class containing the loaded radiative kernels.
+    cart_out
         Output directory where results will be saved.
-
-    use_atm_mask : bool, default True
-        If True, apply an atmospheric mask to the anomalies before kernel multiplication.
-    
-    save_pattern : bool, default False
-        If True, save full spatial anomaly patterns (not just global means).
+    use_strat_mask
+        If True, apply a stratospheric mask to the temperature anomalies 
+        to exclude stratospheric levels from the analysis.
+    save_pattern
+        If True, save the full spatial anomaly patterns in addition to global means.
 
     Returns
     -------
-    dict
-        Dictionary containing computed anomalies:
-        - ('clr', 'planck-atmo')
-        - ('clr', 'lapse-rate')
-        - ('cld', 'planck-atmo')
-        - ('cld', 'lapse-rate')
+    radiation
+        Dictionary containing computed Planck surface radiation anomalies:
+        - ('clr', 'planck-atmo') : clear-sky Planck atmospheric anomaly
+        - ('cld', 'planck-atmo') : all-sky Planck atmospheric anomaly
+        - ('clr', 'lapse-rate') : clear-sky lapse-rate anomaly
+        - ('cld', 'lapse-rate') : all-sky lapse-rate anomaly
 
-    Saved Outputs
-    -------------
+    Saved Files
+    -----------
     - dRt_planck-atmo_global_{tip}.nc
+        Global mean of the Planck atmospheric anomaly for each condition (clear/cloudy).
     - dRt_lapse-rate_global_{tip}.nc
-    If `save_pattern=True`, also saves:
+        Global mean of the lapse-rate anomaly for each condition (clear/cloudy).
+
+    If `save_pattern` is True, also saves:
+
     - dRt_planck-atmo_pattern_{tip}.nc
+        Full spatial pattern of the Planck atmospheric anomaly for each condition (clear/cloudy).
     - dRt_lapse-rate_pattern_{tip}.nc
+        Full spatial pattern of the lapse-rate anomaly for each condition (clear/cloudy).
     """
     radiation=dict()
     if use_strat_mask==True:
@@ -1839,52 +2109,42 @@ def Rad_anomaly_planck_atm_lr(experiment,  kernel, cart_out, use_strat_mask=True
         feedbacks_atmo.close()
         feedbacks_lr.close()
 
-    return(radiation)
+    return radiation
 
 #ALBEDO
 
-def Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern=False):
+def Rad_anomaly_albedo(experiment: Experiment, kernel: Kernel, cart_out: str, save_pattern: bool = False) -> dict[tuple[str, str], xr.DataArray]:
     """
     Compute the albedo radiation anomaly using climate model output and radiative kernels.
 
     Parameters
     ----------
-    experiment : object
-        Climate experiment object containing anomaly fields.
-        Must include:
-        - experiment.ds_anom['alb'] : surface albedo anomaly field
-          with dimensions including ``time`` and spatial coordinates.
-
-    kernel : object
-        Radiative kernel object.
-        Must include:
-        - kernel.kernel[(tip, 'alb')] : albedo radiative kernel
-          for each sky condition (`tip` = ``'clr'`` or ``'cld'``)
-        - kernel.name : kernel type (used to optionally skip unsupported cases)
-
-    cart_out : str
+    experiment
+        Instance of the Experiment class containing the model datasets and anomalies.
+    kernel
+        Instance of the Kernel class containing the loaded radiative kernels.
+    cart_out
         Output directory where results will be saved.
-
-    save_pattern : bool, default False
+    save_pattern
         If True, save the full spatial anomaly patterns in addition to global means.
-        
+
     Returns
     -------
-    dict
+    radiation
         Dictionary containing computed albedo radiation anomalies:
         - ('clr', 'albedo') : clear-sky albedo anomaly
         - ('cld', 'albedo') : all-sky albedo anomaly
 
-    Saved Outputs
-    -------------
+    Saved Files
+    -----------
     - dRt_albedo_global_{tip}.nc
-    (global mean anomaly for each sky condition, `tip` = clr or cld)
+        Global mean of the albedo anomaly for each condition (clear/cloudy).
 
-    If `save_pattern=True`, also saves:
+    If `save_pattern` is True, also saves:
+
     - dRt_albedo_pattern_{tip}.nc
-    (full spatial anomaly field for each sky condition)
-"""
-    
+        Full spatial pattern of the albedo anomaly for each condition (clear/cloudy).
+    """  
     radiation=dict()
 
     if kernel.name == "SPECTRAL":
@@ -1908,62 +2168,46 @@ def Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern=False):
         dRt_glob.to_netcdf(cart_out+ "dRt_albedo_global_" +tip + ".nc", format="NETCDF4")
         dRt_glob.close()
 
-    return(radiation)
+    return radiation
 
 #W-V COMPUTATION
-def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False):
-    
+
+def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False) -> dict[tuple[str, str], xr.DataArray]:
     """
     Compute water vapor radiation anomalies using climate model output and radiative kernels.
 
     Parameters
     ----------
-    experiment : object
-        Climate experiment object containing anomaly fields.
-        Must include:
-        - experiment.ds_anom : dataset of anomalies
-          (either ``hus`` or ``hus_log`` depending on kernel settings)
-        - experiment.ds : raw fields used for masking (e.g. ``ta``)
-
-    control : object
-        Control climatology object used for normalization and scaling.
-        Must include:
-        - control.ds_clim['ta'] : temperature climatology
-        - control.ds_clim['hus'] : water vapor climatology
-
-    kernel : object
-        Radiative kernel object.
-        Must include:
-        - kernel.kernel[(tip, 'wv_lw')] : longwave water vapor kernel
-        - kernel.kernel[(tip, 'wv_sw')] : shortwave water vapor kernel (if applicable)
-        - kernel.dp : pressure thickness weights
-        - kernel.name : kernel type (e.g. ``SPECTRAL``, ``ERA5``, ``HUANG``)
-        - kernel.use_log_wv : whether water vapor is treated in log space
-
-    cart_out : str
-        Output directory where NetCDF files will be saved.
-
-    use_atm_mask : bool, default True
-        If True, apply an atmospheric mask before kernel multiplication.
-
-    save_pattern : bool, default False
+    experiment
+        Instance of the Experiment class containing the model datasets and anomalies.
+    control
+        Instance of the Experiment class containing the control datasets.
+    kernel : Kernel
+        Instance of the Kernel class containing the loaded radiative kernels.
+    cart_out
+        Output directory where results will be saved.
+    use_strat_mask
+        If True, apply a stratospheric mask to the water vapor anomalies 
+        to exclude stratospheric levels from the analysis.
+    save_pattern
         If True, save the full spatial anomaly patterns in addition to global means.
 
     Returns
     -------
-    dict
+    radiation
         Dictionary containing computed water vapor radiation anomalies:
         - ('clr', 'water-vapor') : clear-sky water vapor anomaly
         - ('cld', 'water-vapor') : all-sky water vapor anomaly
-
-    Saved Outputs
-    -------------
+    
+    Saved Files
+    -----------
     - dRt_water-vapor_global_{tip}.nc
-      (global mean anomaly for each sky condition, `tip` = clr or cld)
+        Global mean of the water vapor anomaly for each condition (clear/cloudy).
 
-    If `save_pattern=True`, also saves:
+    If `save_pattern` is True, also saves:
+    
     - dRt_water-vapor_pattern_{tip}.nc
-      (full spatial anomaly field for each sky condition)
+        Full spatial pattern of the water vapor anomaly for each condition (clear/cloudy).
     """
     radiation=dict()
     
@@ -2081,27 +2325,30 @@ def Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask=True, s
     return radiation
 
 #CLOUD ANOMALY
-def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False, save_pattern=False):
+def Rad_anomaly_cloud(experiment: Experiment, cart_out: str, output_lw_sw: bool = False, save_pattern: bool = False) -> xr.DataArray:
     """
-    Compute cloud radiative forcing (cloud feedback) anomalies using model output.
-
+    Computes cloud radiative forcing (cloud feedback) anomalies using model output 
+    and previously computed radiative anomalies for other feedbacks.
 
     Parameters
     ----------
-    experiment : object
-        Climate experiment object containing radiative flux anomalies.
-        Must include:
-        - experiment.ds_anom['net_toa_cs'] : net top-of-atmosphere radiation (reference)
-        - experiment.ds_anom['net_toa']  : net top-of-atmosphere radiation (perturbed)
-
-    cart_out : str
-        Output directory where intermediate and final NetCDF files are stored.
+    experiment
+        Instance of the Experiment class containing radiative flux anomalies.
+    cart_out
+        Output directory where results will be saved.
+    output_lw_sw : bool, default False
+        If True, returns a list containing Total, Longwave (LW), and Shortwave (SW) 
+        cloud radiative anomalies. If False, returns only the Total anomaly.
+    save_pattern : bool, default False
+        If True, computes and saves the 2D spatial pattern of the cloud 
+        radiative anomalies in addition to the global means.
 
     Returns
     -------
-    xarray.DataArray
-        Global mean cloud radiative anomaly, stored as a time-averaged annual mean
-        and named ``cloud``.
+    xr.DataArray or list of xr.DataArray
+        If `output_lw_sw` is False, returns a single DataArray for the global mean 
+        total cloud radiative anomaly. If True, returns a list of DataArrays 
+        [Total, LW, SW].
 
     Notes
     -----
@@ -2126,7 +2373,7 @@ def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False, save_pattern=F
     Saved Outputs
     -------------
     - dRt_cloud_global.nc
-      (global mean cloud radiative anomaly)
+      Global mean of the cloud radiative forcing anomaly.
     """
 
     rad_fields = [('net_toa_cs', 'net_toa'), ('rlut', 'rlutcs'), ('rsut', 'rsutcs')]
@@ -2162,7 +2409,7 @@ def Rad_anomaly_cloud(experiment, cart_out, output_lw_sw = False, save_pattern=F
 
 #ALL RAD_ANOM COMPUTATION
 
-def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, force_recompute=True):
+def calc_anoms(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, force_recompute: bool = True) -> tuple[dict, dict, dict, dict, dict | xr.DataArray]:
     """
     Compute or load all radiative kernel-based anomaly components.
 
@@ -2173,54 +2420,37 @@ def calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=True, save_
 
     Parameters
     ----------
-    experiment : object
-        Climate experiment object containing anomaly fields used by all feedback routines.
-
-    control : object
-        Control climatology object required for normalization in water vapor calculations.
-
-    kernel : object
-        Radiative kernel object used across all feedback components.
-
-    cart_out : str
-        Output directory where NetCDF files are stored or read from.
-
-    use_strat_mask : bool, optional (default=True)
-        If True, applies a stratospheric mask in relevant atmospheric calculations.
-
-    save_pattern : bool, optional (default=False)
-        If True, saves full spatial anomaly patterns in addition to global means.
-
-    force_recompute : bool, optional (default=True)
-        If True, recomputes all components even if cached NetCDF files exist.
-
+    experiment
+        Instance of the Experiment class containing the model datasets and anomalies.
+    control
+        Instance of the Experiment class containing the control datasets.
+    kernel
+        Instance of the Kernel class containing the loaded radiative kernels.
+    cart_out
+        Output directory where results and intermediate files will be saved.
+    use_strat_mask
+        If True, masks stratospheric temperature changes when computing atmospheric feedbacks.
+    save_pattern
+        If True, computes and saves the full spatial feedback patterns for each component.
+    force_recompute
+        If True, forces the recomputation of all anomalies even if cached files exist.
+    
     Returns
     -------
     tuple
-        A tuple of xarray objects containing all radiative components:
-
-        - anom_ps    : Planck surface anomaly
-        - anom_pal   : Planck atmosphere + lapse-rate anomaly
-        - anom_a     : albedo anomaly
-        - anom_wv    : water vapor anomaly
-        - anom_cloud : cloud radiative anomaly
+        A tuple containing dictionaries of computed anomalies for each feedback component:
+        - anom_ps: Planck surface anomalies (clear and cloudy)
+        - anom_pal: Planck atmosphere and lapse-rate anomalies (clear and cloudy)
+        - anom_a: Albedo anomalies (clear and cloudy)
+        - anom_wv: Water vapor anomalies (clear and cloudy)
+        - anom_cloud: Cloud anomalies (global mean)
 
     Notes
     -----
     This function acts as a pipeline wrapper that ensures consistency across all
     radiative feedback components. Each component is computed only if missing or
     if ``force_recompute=True``.
-
-    Expected output files include:
-
-    - dRt_planck-surf_global_clr.nc
-    - dRt_planck-atmo_global_clr.nc
-    - dRt_albedo_global_clr.nc
-    - dRt_water-vapor_global_clr.nc
-    - dRt_cloud_global.nc
-
     """
-
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
     if not os.path.exists(path) or force_recompute:
@@ -2276,9 +2506,11 @@ dRt_nocloud=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo'
 dRt_nocloud_lw=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor-lw']
 dRt_nocloud_sw=['water-vapor-sw', 'albedo']
 
-def open_dRt(cart_out, names=dRt_all):
+
+def open_dRt(cart_out: str, names: list[str] = dRt_all) -> dict:
     """
-    create a dict with dRt[(tip, i)] with tip 'clr' or 'cld' (sky condition) and i in names with all radiative anomalies at TOA
+    Create a dict with dRt[(tip, i)] with tip 'clr' or 'cld' (sky condition) 
+    and i in names with all radiative anomalies at TOA
     """
     dRt= {}
     for tip in ['clr', 'cld']:
@@ -2290,9 +2522,10 @@ def open_dRt(cart_out, names=dRt_all):
     return dRt
 
 
-def open_dRt_pattern(cart_out, names=dRt_all):
+def open_dRt_pattern(cart_out: str, names: list[str] = dRt_all) -> dict:
     """
-    create a dict with dRt[(tip, i)] with tip 'clr' or 'cld' (sky condition) and i in names with all radiative anomalies at TOA
+    Create a dict with dRt[(tip, i)] with tip 'clr' or 'cld' (sky condition) 
+    and i in names with all radiative anomalies at TOA
     """
     dRt= {}
     for tip in ['clr', 'cld']:
@@ -2303,65 +2536,38 @@ def open_dRt_pattern(cart_out, names=dRt_all):
                 dRt[('cld', i)] = xr.open_dataarray(cart_out+"dRt_" + i + "_pattern.nc",  decode_times=time_coder)
     return dRt
 
-
-
-def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num_year_fb=10, fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo'], cloud_fbnams = ['cloud', 'cloud-lw', 'cloud-sw']):
+def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, num_year_fb: int = 10, fbnams: list[str] | None = None, cloud_fbnams: list[str] | None = None) -> dict[str, Any]:
     """
     Compute full radiative feedback decomposition and interannual regression
     against global mean surface temperature.
 
-    It includes all major radiative feedbacks:
-    Planck (surface and atmosphere), lapse-rate, water vapor, albedo, and cloud.
-
     Parameters
     ----------
-    experiment : object
-        Climate experiment object containing anomaly fields.
-
-    control : object
-        Control climatology object used for water vapor normalization.
-
-    kernel : object
-        Radiative kernel object used for all feedback calculations.
-
-    cart_out : str
-        Directory where radiative anomaly NetCDF files are stored.
-
-    use_strat_mask : bool, optional (default=True)
-        If True, applies a stratospheric mask in atmospheric computations.
-
-    save_pattern : bool, optional (default=False)
-        If True, computes and saves spatial feedback patterns and regression errors.
-
-    num_year_fb : int, optional (default=10)
-        Number of years used for temporal binning before regression.
-
+    experiment
+        Instance containing the model datasets and anomalies.
+    control
+        Instance containing the control run datasets.
+    kernel
+        Instance containing the loaded radiative kernels.
+    cart_out
+        Output directory where results and intermediate files will be saved.
+    use_strat_mask
+        If True, masks stratospheric temperature changes when computing atmospheric feedbacks.
+    save_pattern
+        If True, computes and saves the full spatial feedback patterns.
+    num_year_fb : int, default 10
+        Number of years per chunk for temporal averaging (default is decadal).
+    fbnams : list of str, optional
+        List of standard clear-sky/all-sky feedback names to compute.
+    cloud_fbnams : list of str, optional
+        List of cloud-specific feedback names to compute.
+    
     Returns
     -------
     dict
-        Dictionary with two entries:
-
-        fb_coeffs : dict
-            Linear regression results for each feedback component.
-
-            Keys:
-            - (tip, fbn) where:
-                - tip ∈ {'clr', 'cld'}
-                - fbn ∈ {'planck-surf', 'planck-atmo', 'lapse-rate',
-                         'water-vapor', 'albedo', 'cloud'}
-
-            Values:
-            - scipy.stats.linregress result objects
-
-        fb_pattern : dict or None
-            Spatial feedback regression results (only if save_pattern=True).
-
-            Keys:
-            - (tip, fbn)
-
-            Values:
-            - tuple (slope, stderr) as xarray DataArrays
-
+        A dictionary containing:
+        - "fb_coeffs": A dictionary mapping `(sky_condition, feedback_name)` to SciPy linear regression results.
+        - "fb_pattern": A dictionary of spatial feedback patterns (slope and standard error) if `save_pattern` is True.
     """
 
     try:
@@ -2432,12 +2638,11 @@ def calc_fb(experiment, control, kernel, cart_out, use_strat_mask=True, save_pat
             fb_pattern[(tip, fbn)] = (slope, stderr)
             slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn + ".nc", format="NETCDF4")
             stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn + ".nc", format="NETCDF4")
-    
+
     return {
         "fb_coeffs": fb_coef,
         "fb_pattern": fb_pattern if save_pattern else None,
     }
-
 
 def regre_with_err(gtas, feedback, bootstrap_error = True):
     """
@@ -2464,68 +2669,72 @@ def regre_with_err(gtas, feedback, bootstrap_error = True):
     
         return fb_coef
 
+def calc_inter(ds: xr.DataArray, running_years: int) -> xr.DataArray:
+    """
+    Computes the interannual variability (trend) by subtracting the running mean from the dataset.
 
-def calc_inter(ds, running_years):
+    Parameters
+    ----------
+    ds
+        The input dataset or data array.
+    running_years
+        Number of years used for the running mean window.
+
+    Returns
+    -------
+    trend
+        The interannual anomaly (original data minus its running mean).
+    """
     med = ctl.running_mean(ds, running_years)
     trend=ds-med
     return trend
 
-
-def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, running_years=25, fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo'], cloud_fbnams = ['cloud', 'cloud-lw', 'cloud-sw']):   
+def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, running_years: int = 25, fbnams: list[str] = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo'], cloud_fbnams: list[str] = ['cloud', 'cloud-lw', 'cloud-sw']) -> dict[str, Any]:    
     """
     Compute interannual radiative feedback coefficients using kernel-based anomalies
     and global temperature variability.
-
     If required anomaly components are missing, they are computed automatically.
 
     Parameters
     ----------
-    experiment : object
-        Climate experiment object containing anomaly fields.
-
-    control : object
-        Control climatology object used for water vapor normalization.
-
-    kernel : object
-        Radiative kernel object used to compute feedback components.
-
-    cart_out : str
-        Output directory where NetCDF files are stored or read from.
-
-    use_strat_mask : bool, optional (default=True)
-        If True, applies a stratospheric mask where appropriate.
-
-    save_pattern : bool, optional (default=False)
-        If True, computes and saves spatial feedback patterns and regression errors.
-
-    running_years : int, optional (default=25)
-        Window length used for temporal smoothing of anomalies and temperature
-        time series before regression.
+    experiment
+        Instance containing the model datasets and anomalies.
+    control
+        Instance containing the control run datasets.
+    kernel
+        Instance containing the loaded radiative kernels.
+    cart_out
+        Output directory where results and intermediate files will be saved.
+    use_strat_mask
+        If True, masks stratospheric temperature changes.
+    save_pattern
+        If True, computes and saves the full spatial feedback patterns.
+    running_years
+        Window size (in years) used to compute the running mean.
+    fbnams : list of str, optional
+        List of standard clear-sky/all-sky feedback names to compute.
+    cloud_fbnams : list of str, optional
+        List of cloud-specific feedback names to compute.
 
     Returns
     -------
     dict
-        Dictionary of linear regression results (feedback coefficients).
-
-        Keys:
-        - (tip, fbn) where:
-            - tip ∈ {'clr', 'cld'}
-            - fbn ∈ {'planck-surf', 'planck-atmo', 'lapse-rate',
-                     'water-vapor', 'albedo'}
-
-        Values:
-        - stats.linregress result objects containing slope, intercept,
-          r-value, p-value, and standard error.
+        A dictionary containing:
+        - "fb_coeffs": A dictionary mapping `(sky_condition, feedback_name)` to SciPy linear regression results.
+        - "fb_pattern": A dictionary of spatial feedback patterns (slope and standard error) if `save_pattern` is True.
 
     """ 
 
     try:
+        #dRt_all e dRt_all_cloud non sono passati come parametri, stiamo forzando 
+        #l'uso di variabili esterne ignorando fbnams/cloud_fbnams forniti in input?
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
     except Exception as exp:
         print(exp)
         _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
 
+    #stiamo sovrascrivendo l'input fbnams dell'utente annullando il parametro.
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     dRt={}
     fb_coef = dict()
@@ -2586,66 +2795,45 @@ def calc_fb_interannual(experiment, control, kernel, cart_out, use_strat_mask=Tr
             fb_pattern[('cld', fbn)] = (slope, stderr)
             slope.to_netcdf(cart_out + "feedback_int_pattern_"+ fbn + ".nc", format="NETCDF4")
             stderr.to_netcdf(cart_out + "feedback_int_pattern_error_"+ fbn + ".nc", format="NETCDF4")
-    
 
     return {
         "fb_coeffs": fb_coef,
         "fb_pattern": fb_pattern if save_pattern else None,
     }
 
-
-def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_strat_mask=True, save_pattern=False, num_year_fb=10):
+def calc_single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out: str, control: Experiment | None = None, use_strat_mask: bool = True, save_pattern: bool = False, num_year_fb: int = 10) -> dict[str, Any]:
     """
-    Compute interannual radiative feedback for a single radiative component.
-
-    This function extracts or computes a specific radiative feedback component,
+    Computes and extracts the linear regression feedback for a single specific variable. 
+    This function extracts or computes a radiative feedback component,
     aggregates it into multi-year bins, and estimates its sensitivity to global
     mean surface temperature via linear regression.
 
     Parameters
     ----------
-    name : str
-        Name of the radiative feedback component to analyze.
-        Must be one of:
-        - 'planck-surf'
-        - 'planck-atmo'
-        - 'lapse-rate'
-        - 'water-vapor'
-        - 'albedo'
-        - 'cloud'
-
-    experiment : object
-        Climate experiment object containing anomaly fields.
-
-    kernel : object
-        Radiative kernel object used for feedback calculations.
-
-    cart_out : str
-        Directory where precomputed anomaly files are stored or written.
-
-    control : object, optional
-        Control climatology object (required for water vapor and cloud calculations).
-
-    use_strat_mask : bool, optional (default=True)
-        If True, applies a stratospheric mask where relevant.
-
-    save_pattern : bool, optional (default=False)
-        If True, saves spatial anomaly patterns when computing missing components.
-
-    num_year_fb : int, optional (default=10)
-        Number of years used for temporal binning before regression.
-
+    name
+        The name of the feedback to compute (e.g., 'albedo', 'cloud', 'water-vapor').
+    experiment
+        Instance containing the model datasets and anomalies.
+    kernel
+        Instance containing the loaded radiative kernels.
+    cart_out
+        Output directory where results and intermediate files will be saved.
+    control
+        Instance containing the control run datasets (required for 'water-vapor' and 'cloud').
+    use_strat_mask
+        If True, masks stratospheric temperature changes.
+    save_pattern
+        If True, saves the spatial anomaly patterns during anomaly computation.
+    num_year_fb : int, default 10
+        Number of years per chunk for temporal averaging (default is decadal).
+    
     Returns
     -------
-    dict or scipy.stats._linregress
-        If ``name != 'cloud'``:
-            Dictionary with keys (tip, name) where:
-            - tip ∈ {'clr', 'cld'}
-            - value: linear regression result (slope, intercept, etc.)
-
-        If ``name == 'cloud'``:
-            Single regression result object for cloud feedback.
-
+    dict
+        A dictionary containing:
+        - "fb_coeffs": A dictionary mapping `(sky_condition, feedback_name)` to SciPy linear regression results.
+        - "fb_pattern": A dictionary of spatial feedback patterns if `save_pattern` is True, else None.
+    
     Notes
     -----
     The function performs the following steps:
@@ -2659,12 +2847,9 @@ def calc_single_feedback(name, experiment, kernel, cart_out, control=None, use_s
         \\lambda = \\frac{dR}{dT}
 
     where:
-    - ``dR`` is the radiative anomaly
-    - ``dT`` is global mean surface temperature anomaly
+        - ``dR`` is the radiative anomaly
+        - ``dT`` is global mean surface temperature anomaly
 
-    
-    Notes
-    -----
     Cloud feedback is treated separately because it does not follow the same
     clear-sky / all-sky decomposition structure as other components.
     """
