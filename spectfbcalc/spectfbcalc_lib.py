@@ -2726,15 +2726,12 @@ def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Ker
     """ 
 
     try:
-        #dRt_all e dRt_all_cloud non sono passati come parametri, stiamo forzando 
-        #l'uso di variabili esterne ignorando fbnams/cloud_fbnams forniti in input?
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
     except Exception as exp:
         print(exp)
         _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
 
-    #stiamo sovrascrivendo l'input fbnams dell'utente annullando il parametro.
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     dRt={}
     fb_coef = dict()
