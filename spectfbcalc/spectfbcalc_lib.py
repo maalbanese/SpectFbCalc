@@ -44,7 +44,8 @@ from difflib import get_close_matches
 import dask
 import psutil
 from xarray import unify_chunks
- 
+from types import SimpleNamespace
+
 from pathlib import Path
 from cdo import Cdo
 from typing import Literal, Any
@@ -57,6 +58,7 @@ STD_VARS = {"hus", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas
 STD_VARS_LOGQ = {"hus_log", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 STD_VARS_NOALB = {"hus", "rlut", "rsdt", "rlutcs", "rsut", "rsutcs", "ta", "tas", "ts", "rsds", "rsus"}
 STD_VARS_ECE4 = {"hus", "rlut", "rsdt", "rlntcs", "rsut", "rsntcs", "alb", "ta", "tas", "ts"}
+STD_VARS_SPECT = {"wv_vmr", "wv_vmr_log", "rlut", "rsdt", "rlutcs", "alb", "rsut", "rsutcs", "ta", "tas", "ts"}
 
 
 def regrid(ds: xr.DataArray | xr.Dataset, target_ds: xr.Dataset | xr.DataArray) -> xr.DataArray | xr.Dataset:
@@ -108,7 +110,8 @@ class Kernel:
     use_log_wv : bool
         Flag indicating if the kernel requires logarithmic water vapor (e.g., True for HUANG).
     """
-    def __init__(self, name: Literal['HUANG', 'ERA5', 'SPECTRAL'], config: dict[str, Any] | None = None, path_input: str | None = None, filename_template: str | None = None) -> None:
+
+    def __init__(self, name: Literal['HUANG', 'ERA5', 'SPECTRAL'], config: dict[str, Any] | None = None, path_input: str | None = None, filename_template: str | None = None, wv_method_spectral: str = 'hybrid') -> None:
         if name not in ['HUANG', 'ERA5', 'SPECTRAL']:
             raise ValueError(f'kernel name {name} not supported')
             
@@ -125,9 +128,14 @@ class Kernel:
         print(f"Loading kernel: {name}")
         self.kernel, self.dp = load_kernel(self.name, self.cart_k, finam = self.filename_template)
 
-        self.use_log_wv = False
+        self.wv_name = 'hus'
         if self.name in ['HUANG']: # Add here other kernels that need hus_log
-            self.use_log_wv = True
+            self.wv_name = 'hus_log'
+        elif self.name == 'SPECTRAL':
+            self.wv_name = 'wv_vmr'
+        
+        if self.name == 'SPECTRAL':
+            self.wv_method = wv_method_spectral
 
         if self.name in ['HUANG', 'ERA5']:
             self.dp = self.dp/100. # in units of 100 hPa
@@ -178,6 +186,44 @@ class Kernel:
             f")"
         )
 
+
+    def check_spatial_range(self, lat_range: dict[str, float] | None = None, lon_range: dict[str, float] | None = None) -> None:
+        """
+        Subsets the kernel variables and layer widths over specified spatial ranges.
+
+        This method dynamically applies spatial slicing to all variables stored in the 
+        `kernel` dictionary and to the `dp` attribute to ensure dimension consistency.
+        It handles standard latitude slicing (accounting for coordinate orientation) 
+        and supports crossing the prime meridian for longitude ranges on a 0-360 grid.
+
+        Parameters
+        ----------
+        lat_range : dict, optional
+            Dictionary containing 'start' and 'end' keys for the latitude bounds.
+        lon_range : dict, optional
+            Dictionary containing 'start' and 'end' keys for the longitude bounds.
+        """
+        if self.name == 'SPECTRAL':
+            names=['t', 'ts', 'wv_lw_lin', 'wv_lw_log', 'ozo', 'co2', 'ch4', 'n2o']
+        else:
+            names=['alb', 'wv_lw', 'wv_sw', 't', 'ts']
+        c=['clr','cld']
+        
+        if lat_range:
+            print('Lat range to apply:', lat_range)
+            for tip in c:
+                for cat in names:
+                    self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lat=slice(lat_range['start'], lat_range['end']))
+        
+        if lon_range:
+            print('Lon range to apply:', lon_range)
+            for tip in c:
+                for cat in names:
+                    if lon_range['start'] is not None:
+                        if lon_range['start'] > lon_range['end']:
+                            self.kernel[(tip, cat)] = xr.concat([self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'] , 360)), self.kernel[(tip, cat)].sel(lon=slice(0, lon_range['end']))], dim="lon")
+                        else:
+                            self.kernel[(tip, cat)] = self.kernel[(tip, cat)].sel(lon=slice(lon_range['start'], lon_range['end']))
  
 class Experiment:
     """
@@ -213,7 +259,11 @@ class Experiment:
     surf_pressure : xarray.DataArray
         Remapped and time-averaged surface pressure data (if loaded).
     """
-    def __init__(self, name: str, orig_dir: str | Path, remap_dir: str | Path = "remapped", raw_variables: set[str] | list[str] | tuple[str] = STD_VARS_NOALB, time_chunk: int = 20, variable_mapping: dict[str, str] | None = None, file_dict: dict[str, Any] | None = None) -> None:
+    def __init__(self, name: str, orig_dir: str | Path, remap_dir: str | Path = "remapped", raw_variables: set[str] | list[str] | tuple[str] = STD_VARS_NOALB, time_chunk: int = 20, variable_mapping: dict[str, str] | None = None, file_dict: dict[str, Any] | None = None, chunks_remap: dict[str, int] | None = None) -> None:
+        
+        if chunks_remap is None:
+            chunks_remap = {'time': 120}
+
         self.name = name
         self.raw_variables = raw_variables
         
@@ -222,7 +272,7 @@ class Experiment:
 
         self.remap_dir.mkdir(parents=True, exist_ok=True)
         self.chunks = {'time': time_chunk}
-        self.chunks_remap = {'time': 120} # this is for remapped data
+        self.chunks_remap = chunks_remap # this is for remapped data
 
         if variable_mapping is None:
             self.variable_mapping = {var: var for var in self.raw_variables}
@@ -336,6 +386,9 @@ class Experiment:
             If specified, forces the use of a particular CDO remapping method (e.g., "remapbil", "remapcon", "ycon", etc.) when smmregrid is used for unstructured grids. 
             If None, defaults to "ycon" for unstructured grids.
         """
+        if cdo_method is None:
+            cdo_method = "ycon"
+
         if self.check_remapped():
             self.load_remapped()
             return
@@ -350,8 +403,6 @@ class Experiment:
             is_unstructured = 'cell' in ds_check.dims
 
         if is_unstructured:
-            if cdo_method is None:
-                cdo_method = "ycon"
             print(f"Unstructured grid detected, using smmregrid with method: {cdo_method}")
             self.remap_cdo(target_grid_file=target_grid_ds, method=cdo_method)
             self.load_remapped()
@@ -372,7 +423,6 @@ class Experiment:
         import subprocess
 
         if isinstance(target_grid_file, (xr.Dataset, xr.DataArray)):
-            # Estrai lat/lon dalla DataArray/Dataset del kernel
             if isinstance(target_grid_file, xr.DataArray):
                 ds = target_grid_file.to_dataset(name=target_grid_file.name or 'data')
             else:
@@ -395,7 +445,6 @@ class Experiment:
                 )
                 temp_target = temp_nc3
             return str(temp_target)
-
         else:
             return str(target_grid_file)
 
@@ -410,16 +459,13 @@ class Experiment:
         save_remapped 
             If True, saves the newly remapped variables to disk as NetCDF files.
         """
-        ### Improve! use smmregrid instead. compatibility with gaussian reduced/curvilinear?
         remapped = {var: regrid(self.raw_data[var], target_ds) for var in self.raw_variables}
 
-        # compute and save
         if save_remapped:
             print("Saving remapped to disk")
-            for var in remapped:
+            for var, ds in remapped.items():
                 print(var)
-                remapped[var] = remapped[var].compute()
-                remapped[var].to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
+                ds.to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
             
         self.ds = xr.merge([remapped[var] for var in remapped])
 
@@ -614,13 +660,14 @@ class Experiment:
         self.surf_pressure = psye.compute()
         print("Surface pressure successfully loaded, remapped and averaged.")
     
-    def Net_TOA(self) -> None:
+
+    def compute_net_TOA(self):
         """
         Computes Net TOA fluxes (all-sky and clear-sky) and adds them to the dataset.
         """
         print('Creating Net TOA variables')
-        self.ds['Net'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut'] #net_toa_allsky
-        self.ds['Net0'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs'] #net_toa_clr
+        self.ds['net_toa'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut'] #net_toa_allsky
+        self.ds['net_toa_cs'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs'] #net_toa_clr
  
     
     def check_albedo(self) -> None:
@@ -659,6 +706,21 @@ class Experiment:
             print('Applying log to hus')
             self.ds['hus_log'] = da.log(self.ds['hus'])
             del self.ds['hus']
+    
+    def convert_hus_to_vmr(self) -> None:
+        """
+        Converts specific humidity to water vapor vmr (in ppm).
+        """
+        if not self.ds:
+            raise ValueError('Remapped data not loaded (self.ds is empty)')
+    
+        if 'wv_vmr' in self.ds.data_vars:
+            print('wv_vmr already in ds')
+        else:
+            print('Converting hus to wv vmr')
+            self.ds['wv_vmr'] = q_to_ppmv(self.ds['hus'])
+            self.ds['wv_vmr_log'] = da.log(self.ds['wv_vmr'])
+            del self.ds['hus']
 
 
     def check_vars(self, variables: set[str] | list[str] | tuple[str] = STD_VARS_LOGQ) -> None:
@@ -687,8 +749,8 @@ class Experiment:
 
         if 'alb' in variables: self.check_albedo()
         if 'hus_log' in variables: self.check_hus_log()
-    
-        self.Net_TOA()
+        if 'wv_vmr' in variables: self.convert_hus_to_vmr()
+        self.compute_net_TOA()
 
         missing_vars = []
         for var in variables:
@@ -705,21 +767,36 @@ class Experiment:
 
         self.variables = variables
     
-    def check_time_range(self, config: dict[str, Any]) -> None:
+    def check_time_range(self, time_range: dict[str, Any] | None = None) -> None:
         """
         If a time range is specified in the configuration, selects only that period from the dataset.
         
         Parameters
         ----------
-        config
-            Configuration dictionary loaded from the YAML file, 
-            expected to contain a 'time_range_exp' key with 'start' and 'end' subkeys specifying the time slice to select.
+        time_range
+            Dictionary with 'start' and 'end' keys specifying the time slice to select.
         """
-        time_range=config.get('time_range_exp')
         if time_range is not None:
             self.ds = self.ds.sel(time=slice(time_range['start'], time_range['end']))
         
-    def check_coords(self) -> None:
+    def check_spatial_range(self, lat_range: dict[str, Any] | None = None, lon_range: dict[str, Any] | None = None) -> None:
+        """
+        If spatial ranges are specified, subsets the dataset geographically.
+        Handles longitude crossing the prime meridian (e.g., when start > end).
+        """
+        if lat_range:
+            print('Lat range to apply:', lat_range)
+            self.ds = self.ds.sel(lat=slice(lat_range['start'], lat_range['end']))
+
+        if lon_range:
+            print('Lon range to apply:', lon_range)
+            if lon_range['start'] is not None:
+                if lon_range['start'] > lon_range['end']:
+                    self.ds = xr.concat([self.ds.sel(lon=slice(lon_range['start'] , 360)), self.ds.sel(lon=slice(0, lon_range['end']))], dim="lon")
+                else:
+                    self.ds = self.ds.sel(lon=slice(lon_range['start'], lon_range['end']))
+
+    def check_coords(self):
         """
         Checks and renames coordinates to standard names (e.g., time_counter → time, pressure_levels → plev).
         """
@@ -978,56 +1055,48 @@ def load_spectral_kernel(cart_k: str) -> tuple[dict[tuple[str, str], xr.DataArra
         returned by this specific loader.
     """
     tips = {
-        "clear": ("clr", "clearsky_fluxes"),
-        "cloudy":   ("cld", "allsky_fluxes"),
+        "clear": ("clr", "clear_sky_fluxes_use"),
+        "cloudy":   ("cld", "all_sky_fluxes_use"),
     }
+
+    # variable name mapping: nc_name → out_name
     vnams = {
-        "temp_jac": ("t", True),
-        "ts_jac":   ("ts", False),
-        "wv_jac":   ("wv_lw", True),
+        "temp_jac": "t",
+        "ts_jac":   "ts",
+        "linear_wv_jac":   "wv_lw_lin",
+        "logaritmic_wv_jac":   "wv_lw_log",
+        "ozo_jac":   "ozo",
+        "co2_jac":   "co2",
+        "ch4_jac":   "ch4",
+        "n2o_jac":   "n2o"
     }
 
     allkers = {}
     vlevs = None
 
+
     for tip_raw, (tip_out, subdir) in tips.items():
         sky_dir = os.path.join(cart_k, subdir)
-        ds_months = []
-        # --- load monthly files ---
-        for month in range(1, 13):
-            fname = f"spectral_fluxes_kernel_longwave_{month:02d}_{tip_raw}.nc"
+
+        for name_raw, name_out in vnams.items():
+            fname = f"{name_raw}_spectral_fluxes_kernel_longwave_{tip_raw}.nc"
             fpath = os.path.join(sky_dir, fname)
             if not os.path.exists(fpath):
                 raise FileNotFoundError(f"Missing spectral kernel file: {fpath}")
-            ds = xr.open_dataset(fpath, chunks={"freq":1, 'time':'auto'})
-            # explicitly tag the month (temporary time-like dimension)
-            ds = ds.expand_dims(time=[month])
-            ds_months.append(ds)
+            ds = xr.open_dataset(fpath, chunks={"freq": 10, "lat": 30, "lon": 36})
 
-        # --- concatenate months ---
-        kernels = xr.concat(ds_months, dim="time")
-        if kernels.sizes.get("time", 0) != 12:
-            raise ValueError("Spectral kernel must have exactly 12 months")
-        # convert time → month so downstream groupby('time.month') works
-        kernels = (
-            kernels
-            .assign_coords(month=("time", kernels["time"].values))
-            .swap_dims({"time": "month"})
-            .drop_vars("time")
-        )
+            ds = ds.assign_coords(month=("time", np.array(ds["time"].values).astype(int))).swap_dims({"time": "month"}).drop_vars("time")
 
-        # --- extract kernels ---
-        for vna_local, (vna_out, has_lev) in vnams.items():
-            ker = kernels[vna_local]
-            if has_lev:
-                ker = ker.rename({"lev": "plev"})
-            allkers[(tip_out, vna_out)] = ker
+            if 'lev' in ds.coords:
+                ds = ds.rename({"lev": "plev"})
 
-        # --- pressure levels (once is enough) ---
-        if vlevs is None and "lev" in kernels.coords:
-            vlevs = kernels["lev"].rename({"lev": "plev"})
+            if 'wv' in name_raw:
+                var_name = '_'.join(name_raw.split('_')[-2:])
+            else:
+                var_name = name_raw
+            allkers[(tip_out, name_out)] = ds[var_name]/(-1000.) # Convert to W/m2/cm-1 and incoming energy
 
-    # --- save outputs ---
+    # # --- save outputs ---
     # ds_out = xr.Dataset()
 
     # for (tip, vname), da in allkers.items():
@@ -1118,7 +1187,7 @@ def load_kernel_HUANG(cart_k: str, finam: str) -> tuple[dict[tuple[str, str], xr
             file_path = cart_k + finam.format(vna, tip)
 
             if not os.path.exists(file_path):
-                print("ERRORE: Il file non esiste ->", file_path)
+                print("ERROR: no files to open in ->", file_path)
             else:
                 ker = xr.load_dataset(file_path)
                 if vna in ('t', 'wv_lw', 'wv_sw'):
@@ -1219,7 +1288,7 @@ def load_config(config_file: str | Path, variable_mapping_file: str | Path | Non
     
     config["anomaly_method"] = method
 
-    #### qui mkdir e cart_out differenziate
+    
     use_atm_mask=config.get("use_atm_mask", True)
     save_pattern = config.get("save_pattern", False)
     
@@ -1228,22 +1297,25 @@ def load_config(config_file: str | Path, variable_mapping_file: str | Path | Non
     config['num_year_regr'] = config.get("num_year_regr", 10)
     config['num_running_years_trend'] = config.get("num_running_years_trend", 21)
 
-    # Read time ranges from config
+   
     time_range_clim = config.get("time_range_clim", {})
     time_range_exp = config.get("time_range_exp", {})
-    # Validate and clean time ranges
     time_range_clim = time_range_clim if time_range_clim.get("start") and time_range_clim.get("end") else None
     time_range_exp = time_range_exp if time_range_exp.get("start") and time_range_exp.get("end") else None
     
-    print(f"Time range for climatology: {time_range_clim if time_range_clim else 'all'}")
-    print(f"Time range for experiment: {time_range_exp if time_range_exp else 'all'}")
+    print(f'Time range for climatology: {time_range_clim if time_range_clim else "all"}')
+    print(f'Time range for experiment: {time_range_exp if time_range_exp else "all"}')
     config['time_range_exp'] = time_range_exp
     config['time_range_clim'] = time_range_clim
 
-    # Surface pressure management
+    lat_range = config.get("lat_range", {})
+    lon_range = config.get("lon_range", {})
+    config['lat_range']=lat_range
+    config['lon_range']=lon_range
+
+   
     config['pressure_path'] = config['file_paths'].get('pressure_data', None)
 
-    # Load variable mapping for non-CMOR names
     if variable_mapping_file is not None:
         variable_map = load_variable_mapping(variable_mapping_file, config['exp_name']).get('rename_map')
         config['variable_mapping'] = variable_map
@@ -1253,7 +1325,7 @@ def load_config(config_file: str | Path, variable_mapping_file: str | Path | Non
     return config
 
 
-def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: set[str] | list[str] | tuple[str] = STD_VARS_NOALB, save_remapped: bool = True, variable_mapping_file: str | Path | None = None, control_file_dict: dict | None = None, exp_file_dict: dict | None = None) -> tuple[Experiment, Experiment, Kernel]:
+def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: set[str] | list[str] | tuple[str] = STD_VARS_NOALB, save_remapped: bool = True, variable_mapping_file: str | Path | None = None, control_file_dict: dict | None = None, exp_file_dict: dict | None = None, wv_method_spectral: str = 'hybrid', exp_name: str | None = None) -> tuple[Experiment, Experiment, Kernel]:
     """
     Orchestrates the data preparation sequence before feedback calculation.
 
@@ -1276,6 +1348,11 @@ def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: 
         Optional pre-loaded dictionary of control files.
     exp_file_dict
         Optional pre-loaded dictionary of experiment files.
+    wv_method_spectral : str, default 'hybrid'
+        Method used for the water vapor spectral kernel calculation.
+    exp_name : str, optional
+        Name of the experiment. If provided, overrides the configuration 
+        and sets specific output directories.
 
     Returns
     -------
@@ -1289,34 +1366,53 @@ def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: 
     
     # load config
     config = load_config(config_file, variable_mapping_file = variable_mapping_file)
+    if exp_name is not None:
+        print(f'new exp_name: {exp_name}')
+        cart_out = config['file_paths'].get("output")
+        ## Create dirs
+        cart_out_exp = cart_out + f'/{exp_name}/'
+        os.makedirs(cart_out_exp, exist_ok=True)
+        config['cart_out_exp'] = cart_out_exp
+        config['exp_name'] = exp_name
 
     # load kernel
-    kernel = Kernel(ker, config = config)
+    kernel = Kernel(ker, config = config, wv_method_spectral=wv_method_spectral)
     k = kernel.kernel[('clr', 't')]
+    kernel.check_spatial_range(lat_range=config['lat_range'], lon_range=config['lon_range'])
 
-    if kernel.use_log_wv:
+    if ker == 'SPECTRAL':
+        chunks_remap = {'lat': 30, 'lon': 36, 'time': 120}#, 'plev': 1}
+    else:
+        chunks_remap = {'time': 120}#, 'plev': 1}
+
+    if kernel.wv_name == 'wv_vmr':
+        variables = STD_VARS_SPECT
+    elif kernel.wv_name == 'hus_log':
         variables = STD_VARS_LOGQ
     else:
         variables = STD_VARS
     
     # load picontrol (+ remap)
     print('\n -------> Loading control')
-    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], file_dict = control_file_dict)
+    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], chunks_remap = chunks_remap, file_dict = control_file_dict)
 
     control.prepare_input_dataset(target_grid_ds=k)
     control.check_coords() 
     control.check_vars(variables = variables)
     control.vertical_interp(k)
+    control.check_time_range(config['time_range_clim'])
+    control.check_spatial_range(lat_range=config['lat_range'], lon_range=config['lon_range'])
 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
-    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], file_dict = exp_file_dict)
+    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], chunks_remap = chunks_remap, file_dict = exp_file_dict)
     
     experiment.prepare_input_dataset(target_grid_ds=k)
     experiment.check_coords() 
     experiment.check_vars(variables = variables)
     experiment.vertical_interp(k)
-    experiment.check_time_range(config)
+    experiment.check_time_range(config['time_range_exp'])
+    experiment.check_spatial_range(lat_range=config['lat_range'], lon_range=config['lon_range'])
 
     # compute climatology and anomaly
     method = config['anomaly_method']
@@ -1729,25 +1825,6 @@ def Kq_fact(temp: float | np.ndarray | xr.DataArray, method: str, pres: float | 
     return cos
 
 
-# function dlnws(T)
-# begin
-
-# pliq=0.01*exp(54.842763- 6763.22/T-4.21*log(T) + 0.000367*T+tanh(0.0415*(T-218.8))*\
-#                 (53.878 -1331.22/T-9.44523*log(T) + 0.014025*T))
-# pice=exp(9.550426-5723.265/T+3.53068*log(T)-0.00728332*T)/100.
-# T1=T+1.
-# pliq1=0.01*exp(54.842763- 6763.22 / T1-4.21*log(T1) + 0.000367*T1+tanh(0.0415*(T1 - 218.8))*\
-#                 (53.878 -1331.22/T1-9.44523*log(T1) + 0.014025*T1))
-# pice1=exp(9.550426-5723.265/T1+3.53068*log(T1)-0.00728332*T1)/100.
-
-# ws=where(T.ge.273,pliq,pice)
-# ws1=where(T1.ge.273,pliq1,pice1)
-
-# dws=ws/(ws1-ws)
-# return(dws)
-# end
-
-
 ############# SPATIAL PATTERN FUNCTION #############
 def regress_pattern_vectorized(feedback_data: xr.DataArray, gtas: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
     """
@@ -1837,6 +1914,32 @@ def q_to_ppmv(q_inp: float | np.ndarray | xr.DataArray) -> float | np.ndarray | 
     vw_ppmv = q_inp / (1 - q_inp) * (Ma / Mw) * 10**6
     return vw_ppmv
 
+
+def month_calc(anom: xr.DataArray, k: xr.DataArray) -> xr.DataArray:
+    """
+    Performs the product between anom and k splitting by month instead than using groupby.
+    """
+    month_calc = []
+    for month in np.arange(1, 13):
+        #print(f"Processing month {month}...")
+        
+        # Get only this month's data from anom
+        mask = (anom.time.dt.month == month)
+        anom_month = anom.isel(time=mask)
+        
+        # Get this month's data from k
+        k_month = k.sel(month=month)
+        
+        # Multiply without loading everything at once
+        monthly_result = anom_month * k_month
+        month_calc.append(monthly_result)
+
+    # Concatenate month_calc
+    coso = xr.concat(month_calc, dim='time').sortby('time')
+
+    return coso
+
+
 ############ RADIATIVE ANOMALY FUNCTIONS #############
 #PLANCK SURFACE
 
@@ -1874,7 +1977,7 @@ def Rad_anomaly_planck_surf(experiment: Experiment, kernel: Kernel, cart_out: st
     """
     radiation = dict()
     for tip in ['clr', 'cld']:
-        print(f"Processing {tip}")  
+        print(f"Processing {tip}")
         try:
             k = kernel.kernel[(tip, 'ts')]
             # print("Kernel loaded successfully")  
@@ -1882,16 +1985,26 @@ def Rad_anomaly_planck_surf(experiment: Experiment, kernel: Kernel, cart_out: st
             print(f"Error loading kernel for {tip}: {e}")  
             continue  
 
-        dRt = (experiment.ds_anom['ts'].groupby("time.month") * k).groupby("time.year").mean("time")
+        if kernel.name == 'SPECTRAL':
+            dRt = month_calc(experiment.ds_anom['ts'], k)
+            #.groupby("time.year").mean(method="map-reduce", engine="flox")
+        else:
+            dRt = (experiment.ds_anom['ts'].groupby("time.month") * k)
+        
+        # dRt = month_calc(experiment.ds_anom['ts'], k)
 
         #Save full dRt pattern before global averaging
         if save_pattern: 
+            print('in save patt')
+            dRt.load()
             dRt.name = "dRt"
             dRt.attrs["description"] = f"{tip} surface Planck dRt pattern"
             dRt.to_netcdf(cart_out + "dRt_planck-surf_pattern_" + tip +".nc", format="NETCDF4")
 
         #Then compute and save global mean
         dRt_glob = ctl.global_mean(dRt)
+        # weights = np.cos(np.deg2rad(field[latn]))
+        # glomean = field.weighted(weights).mean([latn, lonn])
         planck = dRt_glob.compute()
         planck.name='planck-surf'
         radiation[(tip, 'planck-surf')] = planck
@@ -1963,11 +2076,13 @@ def Rad_anomaly_planck_atm_lr(experiment: Experiment, kernel: Kernel, cart_out: 
             continue  
 
         if kernel.name=='SPECTRAL':
-            dRt_unif = (anoms_unif.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
-            dRt_lr = (anoms_lr.groupby('time.month')*k).sum(dim="plev").groupby("time.year").mean("time")
+            dRt_unif = month_calc(anoms_unif, k).sum(dim="plev")
+            dRt_lr = month_calc(anoms_lr, k).sum(dim="plev")
         else:
-            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
-            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev").groupby("time.year").mean("time")
+            dRt_unif = (anoms_unif.groupby('time.month') * (k * kernel.dp)).sum("plev")
+            dRt_lr = (anoms_lr.groupby('time.month') * (k * kernel.dp)).sum("plev")
+            # dRt_unif = month_calc(anoms_unif, (k * kernel.dp)).sum("plev")
+            # dRt_lr = month_calc(anoms_lr, (k * kernel.dp)).sum("plev")
 
 
         #Save full dRt pattern before global averaging
@@ -1994,7 +2109,7 @@ def Rad_anomaly_planck_atm_lr(experiment: Experiment, kernel: Kernel, cart_out: 
         feedbacks_atmo.close()
         feedbacks_lr.close()
 
-    return(radiation)
+    return radiation
 
 #ALBEDO
 
@@ -2029,8 +2144,7 @@ def Rad_anomaly_albedo(experiment: Experiment, kernel: Kernel, cart_out: str, sa
 
     - dRt_albedo_pattern_{tip}.nc
         Full spatial pattern of the albedo anomaly for each condition (clear/cloudy).
-    """
-    
+    """  
     radiation=dict()
 
     if kernel.name == "SPECTRAL":
@@ -2039,7 +2153,7 @@ def Rad_anomaly_albedo(experiment: Experiment, kernel: Kernel, cart_out: str, sa
 
     for tip in [ 'clr','cld']:
         k = kernel.kernel[(tip, 'alb')]
-        dRt = (experiment.ds_anom['alb'].groupby("time.month") * k).groupby("time.year").mean("time")
+        dRt = 100*(experiment.ds_anom['alb'].groupby("time.month") * k)
             
         #Save full dRt pattern before global averaging
         if save_pattern:
@@ -2049,13 +2163,12 @@ def Rad_anomaly_albedo(experiment: Experiment, kernel: Kernel, cart_out: str, sa
 
         #Then compute and save global mean
         dRt_glob = ctl.global_mean(dRt).compute()
-        alb = 100*dRt_glob
-        alb.name='albedo'
-        radiation[(tip, 'albedo')]= alb
-        alb.to_netcdf(cart_out+ "dRt_albedo_global_" +tip + ".nc", format="NETCDF4")
-        alb.close()
+        dRt_glob.name='albedo'
+        radiation[(tip, 'albedo')]= dRt_glob
+        dRt_glob.to_netcdf(cart_out+ "dRt_albedo_global_" +tip + ".nc", format="NETCDF4")
+        dRt_glob.close()
 
-    return(radiation)
+    return radiation
 
 #W-V COMPUTATION
 
@@ -2098,16 +2211,16 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
     """
     radiation=dict()
     
-    if kernel.use_log_wv:
-        wv_name='hus_log'
-    else:
-        wv_name='hus'
+    wv_name = kernel.wv_name
+    anoms_hus=experiment.ds_anom[wv_name]
+    if kernel.name == 'SPECTRAL':
+        anoms_hus_log = experiment.ds_anom[wv_name+'_log']
         
     if use_strat_mask==True:
         mask=mask_strato(experiment.ds['ta'])
-        anoms_hus= (experiment.ds_anom[wv_name] * mask).sel(plev = mask.plev)
-    else:
-        anoms_hus=experiment.ds_anom[wv_name]
+        anoms_hus=(anoms_hus * mask).sel(plev = mask.plev)
+        if kernel.name == 'SPECTRAL': 
+            anoms_hus_log = (anoms_hus_log * mask).sel(plev = mask.plev)
             
     if kernel.name=='HUANG':
         dln = Kq_fact(control.ds_clim['ta'], method = 'CC')
@@ -2117,23 +2230,33 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
             coso = anoms_hus.groupby('time.month') * dln
     elif kernel.name=='ERA5':
         dq_norm = (anoms_hus.groupby('time.month') / control.ds_clim['hus'])
-        print(dq_norm.shape)
         coso = dq_norm.groupby('time.month') * Kq_fact(control.ds_clim['ta'], method = 'CC')
         # coso = (anoms_hus.groupby('time.month') / control.ds_clim['hus']) * Kq_fact(control.ds_clim['ta'], method = 'linear')
-    elif kernel.name == "SPECTRAL":
-        coso = q_to_ppmv(anoms_hus)
+    elif kernel.name == 'SPECTRAL':
+        coso = anoms_hus
+        coso_log = anoms_hus_log
 
     for tip in ['clr','cld']:
         print(f"Processing {tip}") 
-        kernel_lw = kernel.kernel[(tip, 'wv_lw')]
-        if kernel.name!= 'SPECTRAL':
+        if kernel.name != 'SPECTRAL':
+            kernel_lw = kernel.kernel[(tip, 'wv_lw')]
             kernel_sw = kernel.kernel[(tip, 'wv_sw')]
+        else:
+            kernel_lw_lin = kernel.kernel[(tip, 'wv_lw_lin')]
+            kernel_lw_log = kernel.kernel[(tip, 'wv_lw_log')]
 
         if kernel.name=='SPECTRAL':
-            dRt_lw = (coso.groupby('time.month')* kernel_lw).sum('plev').groupby('time.year').mean('time')
+            # dRt_lw_lin = (coso.groupby('time.month')* kernel_lw_lin).sum('plev')#.groupby('time.year').mean('time')
+            # dRt_lw_log = (np.log(coso).groupby('time.month')* kernel_lw_log).sum('plev')#.groupby('time.year').mean('time')
+            if kernel.wv_method in ['linear', 'hybrid']:
+                dRt_lw_lin = month_calc(coso, kernel_lw_lin).sum('plev')
+            if kernel.wv_method in ['log', 'hybrid']:
+                dRt_lw_log = month_calc(coso_log, kernel_lw_log).sum('plev')
+            
+            #dRt_lw = dRt_lw_log + dRt_lw_lin
         else:
-            dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
-            dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev').groupby('time.year').mean('time')
+            dRt_lw = (coso.groupby('time.month')* (kernel_lw*kernel.dp)).sum('plev')
+            dRt_sw = (coso.groupby('time.month')* (kernel_sw*kernel.dp)).sum('plev')
             dRt = dRt_lw + dRt_sw
                 
         #Save full dRt pattern before global averaging
@@ -2149,30 +2272,60 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
                 dRt_sw.attrs["description"] = f"{tip} water vapor dRt_sw pattern"
                 dRt_sw.to_netcdf(cart_out + "dRt_sw_water-vapor_pattern_" + tip +  ".nc", format="NETCDF4")
 
-        dRt_glob_lw = ctl.global_mean(dRt_lw)
-        wv_lw= dRt_glob_lw.compute()
-        wv_lw.name='water-vapor_lw'
-        wv_lw.to_netcdf(cart_out+ "dRt_lw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
-        radiation[(tip, 'water-vapor_lw')] = wv_lw
+        print('Before WV computation')
+
+        if kernel.name=='SPECTRAL':
+            if kernel.wv_method == 'linear':
+                dRt_glob_lw_lin = ctl.global_mean(dRt_lw_lin)
+                dRt_glob_lw_lin.load()
+                print(f'Computed lin part: {dRt_glob_lw_lin.min()} - {dRt_glob_lw_lin.max()}')
+            elif kernel.wv_method == 'log':
+                dRt_glob_lw_log = ctl.global_mean(dRt_lw_log)
+                dRt_glob_lw_log.load()
+                print(f'Computed log part: {dRt_glob_lw_log.min()} - {dRt_glob_lw_log.max()}')
+            elif kernel.wv_method == 'hybrid':
+                dRt_glob_lw_lin = ctl.global_mean(dRt_lw_lin.sel(freq = slice(651., None)))
+                dRt_glob_lw_lin.load()
+                print(f'Computed lin part: {dRt_glob_lw_lin.min()} - {dRt_glob_lw_lin.max()}')
+                dRt_glob_lw_log = ctl.global_mean(dRt_lw_log.sel(freq = slice(0, 650.)))
+                dRt_glob_lw_log.load()
+                print(f'Computed log part: {dRt_glob_lw_log.min()} - {dRt_glob_lw_log.max()}')
+            else:
+                raise ValueError(f'Kernel wv method {kernel.wv_method} not recognized. Use one among: linear, log, hybrid')
+
+            if kernel.wv_method == 'linear':
+                dRt_glob_lw = dRt_glob_lw_lin
+            elif kernel.wv_method == 'log':
+                dRt_glob_lw = dRt_glob_lw_log
+            else:
+                dRt_glob_lw = xr.concat([dRt_glob_lw_log, dRt_glob_lw_lin], dim = 'freq')
+        else:
+            dRt_glob_lw = ctl.global_mean(dRt_lw)
+            dRt_glob_lw.load()
+            print('Computed')
+
+        dRt_glob_lw.name='water-vapor-lw'
+        dRt_glob_lw.to_netcdf(cart_out+ "dRt_water-vapor-lw_global_" +tip+ ".nc", format="NETCDF4")
+        radiation[(tip, 'water-vapor-lw')] = dRt_glob_lw
+        
         if kernel.name != 'SPECTRAL':
             dRt_glob_sw = ctl.global_mean(dRt_sw)
-            wv_sw= dRt_glob_sw.compute()
-            wv_sw.name='water-vapor_sw'
-            radiation[(tip, 'water-vapor_sw')] = wv_sw
-            wv_sw.to_netcdf(cart_out+ "dRt_sw_water-vapor_global_" +tip+ ".nc", format="NETCDF4")
+            dRt_glob_sw.load()
+            dRt_glob_sw.name='water-vapor-sw'
+            radiation[(tip, 'water-vapor-sw')] = dRt_glob_sw
+            dRt_glob_sw.to_netcdf(cart_out+ "dRt_water-vapor-sw_global_" +tip+ ".nc", format="NETCDF4")
   
             dRt_glob = ctl.global_mean(dRt)
-            wv= dRt_glob.compute()
-            wv.name='water-vapor'
-            radiation[(tip, 'water-vapor')] = wv
-            wv.to_netcdf(cart_out+ "dRt_water-vapor_global_" + tip + ".nc", format="NETCDF4")
-            wv.close()
+            dRt_glob.load()
+            dRt_glob.name='water-vapor'
+            radiation[(tip, 'water-vapor')] = dRt_glob
+            dRt_glob.to_netcdf(cart_out+ "dRt_water-vapor_global_" + tip + ".nc", format="NETCDF4")
+            dRt_glob.close()
         
     return radiation
 
 #CLOUD ANOMALY
-
-def Rad_anomaly_cloud(experiment: Experiment, cart_out: str) -> xr.DataArray:
+def Rad_anomaly_cloud(experiment: Experiment, cart_out: str, output_lw_sw: bool = False, save_pattern: bool = False) -> xr.DataArray:
     """
     Computes cloud radiative forcing (cloud feedback) anomalies using model output 
     and previously computed radiative anomalies for other feedbacks.
@@ -2183,11 +2336,19 @@ def Rad_anomaly_cloud(experiment: Experiment, cart_out: str) -> xr.DataArray:
         Instance of the Experiment class containing radiative flux anomalies.
     cart_out
         Output directory where results will be saved.
+    output_lw_sw : bool, default False
+        If True, returns a list containing Total, Longwave (LW), and Shortwave (SW) 
+        cloud radiative anomalies. If False, returns only the Total anomaly.
+    save_pattern : bool, default False
+        If True, computes and saves the 2D spatial pattern of the cloud 
+        radiative anomalies in addition to the global means.
 
     Returns
     -------
-    cloud
-        DataArray containing the global mean cloud radiative forcing anomaly.
+    xr.DataArray or list of xr.DataArray
+        If `output_lw_sw` is False, returns a single DataArray for the global mean 
+        total cloud radiative anomaly. If True, returns a list of DataArrays 
+        [Total, LW, SW].
 
     Notes
     -----
@@ -2214,19 +2375,37 @@ def Rad_anomaly_cloud(experiment: Experiment, cart_out: str) -> xr.DataArray:
     - dRt_cloud_global.nc
       Global mean of the cloud radiative forcing anomaly.
     """
-    dRt_nocloud = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
-    dRt={}
+
+    rad_fields = [('net_toa_cs', 'net_toa'), ('rlut', 'rlutcs'), ('rsut', 'rsutcs')]
+    names = ['cloud', 'cloud-lw', 'cloud-sw']
+    fbnams_all = [dRt_nocloud, dRt_nocloud_lw, dRt_nocloud_sw]
+
+    dRts=[]
+    for nam, radfi, fbnams in zip(names, rad_fields, fbnams_all):
+        crf = experiment.ds_anom[radfi[0]] - experiment.ds_anom[radfi[1]]
+        crf_glob= ctl.global_mean(crf)
+
+        dRt = open_dRt(cart_out, names=fbnams)
+        dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in fbnams])
+
+        dRt_cloud.load()
+        dRt_cloud.name=nam
+        dRt_cloud.to_netcdf(cart_out + f"dRt_{nam}_global.nc", format="NETCDF4")
+        dRts.append(dRt_cloud)
+
+        if save_pattern:
+            dRt = open_dRt_pattern(cart_out, names=fbnams)
+            dRt_cloud= -crf + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in fbnams])
+
+            dRt_cloud.load()
+            dRt_cloud.name=nam
+            dRt_cloud.to_netcdf(cart_out + f"dRt_{nam}_pattern.nc", format="NETCDF4")
     
-    crf = experiment.ds_anom['Net0'] - experiment.ds_anom['Net']
-    crf_glob= ctl.global_mean(crf).groupby('time.year').mean('time')
+    if output_lw_sw:
+        return dRts
+    else:
+        return dRts[0]
 
-    dRt = open_dRt(cart_out, names=dRt_nocloud)
-
-    dRt_cloud= -crf_glob + sum([dRt[( 'clr', fbn)] - dRt[('cld', fbn)] for fbn in dRt_nocloud])
-    cloud = dRt_cloud.compute()
-    cloud.name='cloud'
-    cloud.to_netcdf(cart_out + "dRt_cloud_global.nc", format="NETCDF4")
-    return cloud
 
 #ALL RAD_ANOM COMPUTATION
 
@@ -2272,73 +2451,92 @@ def calc_anoms(experiment: Experiment, control: Experiment, kernel: Kernel, cart
     radiative feedback components. Each component is computed only if missing or
     if ``force_recompute=True``.
     """
-    def load_dict_anomaly(name: str) -> dict[tuple[str, str], xr.DataArray]:
-        out = {}
-        for tip in ['clr', 'cld']:
-            p = os.path.join(cart_out, f"dRt_{name}_global_{tip}.nc")
-            if os.path.exists(p):
-                out[(tip, name)] = xr.open_dataarray(p, decode_times=time_coder)
-        return out
     print('planck surf')
     path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
     if not os.path.exists(path) or force_recompute:
         anom_ps = Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
     else:
-        print(f'Reading already computed anomalies for planck-surf')
-        anom_ps = load_dict_anomaly('planck-surf')
+        print(f'Reading already computed anomaly from {path}')
+        anom_ps = xr.open_dataset(path)
     
     print('planck atm')
     path = os.path.join(cart_out, "dRt_planck-atmo_global_clr.nc")
     if not os.path.exists(path) or force_recompute:
         anom_pal = Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
     else:
-        print(f'Reading already computed anomalies for planck-atmo')
-        anom_pal = load_dict_anomaly('planck-atmo')
-        anom_pal.update(load_dict_anomaly('lapse-rate')) 
+        print(f'Reading already computed anomaly from {path}')
+        anom_pal = xr.open_dataset(path)
     
     print('albedo')
     path = os.path.join(cart_out, "dRt_albedo_global_clr.nc")
     if not os.path.exists(path) or force_recompute:
         anom_a = Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
     else:
-        print(f'Reading already computed anomalies for albedo')
-        anom_a = load_dict_anomaly('albedo')
+        print(f'Reading already computed anomaly from {path}')
+        anom_a = xr.open_dataset(path)
     
     print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
+    if kernel.name != 'SPECTRAL':
+        path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
+    else:
+        path = os.path.join(cart_out, "dRt_lw_water-vapor_global_clr.nc")
     if not os.path.exists(path) or force_recompute:
         anom_wv = Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)
     else:
-        print(f'Reading already computed anomalies for water-vapor')
-        anom_wv = load_dict_anomaly('water-vapor') 
+        print(f'Reading already computed anomaly from {path}')
+        anom_wv = xr.open_dataset(path) 
 
-    print('cloud')
-    path_check = os.path.join(cart_out, "dRt_cloud_global.nc")
-    path = os.path.join(cart_out, "dRt_cloud_global.nc")
-    if not os.path.exists(path) or force_recompute:
-        anom_cloud = Rad_anomaly_cloud(experiment, control, cart_out)
-    else:
-        print('Reading already computed anomaly for cloud')
-        anom_cloud = xr.open_dataarray(path_check, decode_times=time_coder)
+    anom_cloud = None
+    if kernel.name != 'SPECTRAL':
+        print('cloud')
+        path = os.path.join(cart_out, "dRt_cloud_global.nc")
+        if not os.path.exists(path) or force_recompute:
+            anom_cloud = Rad_anomaly_cloud(experiment, cart_out, save_pattern=save_pattern)
+        else:
+            print(f'Reading already computed anomaly from {path}')
+            anom_cloud = xr.open_dataset(path) 
 
     return anom_ps, anom_pal, anom_a, anom_wv, anom_cloud 
 
 ##FEEDBACK COMPUTATION
         
 dRt_all=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo', 'cloud']
+dRt_all_cloud=['cloud', 'cloud-lw', 'cloud-sw']
 dRt_nocloud=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
+dRt_nocloud_lw=['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor-lw']
+dRt_nocloud_sw=['water-vapor-sw', 'albedo']
 
-def open_dRt(cart_out: str, names: list[str] = dRt_all) -> dict[tuple[str, str], xr.DataArray]:
+
+def open_dRt(cart_out: str, names: list[str] = dRt_all) -> dict:
+    """
+    Create a dict with dRt[(tip, i)] with tip 'clr' or 'cld' (sky condition) 
+    and i in names with all radiative anomalies at TOA
+    """
     dRt= {}
     for tip in ['clr', 'cld']:
         for i in names:
-            if i != 'cloud':
+            if 'cloud' not in i:
                 dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_global_"+tip+ ".nc",  decode_times=time_coder)
-    if 'cloud' in names:
-        dRt[('cld', 'cloud')] = xr.open_dataarray(cart_out+"dRt_cloud_global.nc",  decode_times=time_coder)
+            elif tip == 'cld':
+                dRt[('cld', i)] = xr.open_dataarray(cart_out+f"dRt_{i}_global.nc",  decode_times=time_coder)
     return dRt
 
-def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, num: int = 10) -> dict[str, Any]:
+
+def open_dRt_pattern(cart_out: str, names: list[str] = dRt_all) -> dict:
+    """
+    Create a dict with dRt[(tip, i)] with tip 'clr' or 'cld' (sky condition) 
+    and i in names with all radiative anomalies at TOA
+    """
+    dRt= {}
+    for tip in ['clr', 'cld']:
+        for i in names:
+            if 'cloud' not in i:
+                dRt[(tip, i)]=xr.open_dataarray(cart_out+"dRt_" + i +"_pattern_"+tip+ ".nc",  decode_times=time_coder)
+            elif tip == 'cld':
+                dRt[('cld', i)] = xr.open_dataarray(cart_out+"dRt_" + i + "_pattern.nc",  decode_times=time_coder)
+    return dRt
+
+def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, num_year_fb: int = 10, fbnams: list[str] | None = None, cloud_fbnams: list[str] | None = None) -> dict[str, Any]:
     """
     Compute full radiative feedback decomposition and interannual regression
     against global mean surface temperature.
@@ -2357,9 +2555,13 @@ def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_ou
         If True, masks stratospheric temperature changes when computing atmospheric feedbacks.
     save_pattern
         If True, computes and saves the full spatial feedback patterns.
-    num
-        Number of years per chunk for temporal averaging (default is 10, decadal).
-
+    num_year_fb : int, default 10
+        Number of years per chunk for temporal averaging (default is decadal).
+    fbnams : list of str, optional
+        List of standard clear-sky/all-sky feedback names to compute.
+    cloud_fbnams : list of str, optional
+        List of cloud-specific feedback names to compute.
+    
     Returns
     -------
     dict
@@ -2367,41 +2569,21 @@ def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_ou
         - "fb_coeffs": A dictionary mapping `(sky_condition, feedback_name)` to SciPy linear regression results.
         - "fb_pattern": A dictionary of spatial feedback patterns (slope and standard error) if `save_pattern` is True.
     """
-    print('planck surf')
-    path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
-    
-    print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
-    
-    print('planck atm')
-    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
-    
-    print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)   
 
-    print('cloud')
-    path = os.path.join(cart_out, "dRt_cloud_global.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_cloud(experiment, control, cart_out)
-    
-    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
-    dRt={}
+    try:
+        dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
+    except Exception as exp:
+        print(exp)
+        _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
+        dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
+
     fb_coef = dict()
     fb_pattern = dict()
-    dRt=open_dRt(cart_out)
 
     #compute gtas
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
-    gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
+    gtas = gtas.groupby((gtas.year-start_year) // num_year_fb * num_year_fb).mean()
 
     if save_pattern:
         gtas = gtas.chunk({'year': -1})
@@ -2414,39 +2596,78 @@ def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_ou
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
+            dRt[(tip, fbn)]=dRt[(tip, fbn)].groupby('time.year').mean('time')
             start_year = int(dRt[(tip, fbn)].year.min())
-            feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num * num).mean()
+            feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num_year_fb * num_year_fb).mean()
 
-            res = stats.linregress(gtas, feedback)
-            # mask = np.isfinite(gtas.values) & np.isfinite(feedback.values)
-            # res = stats.linregress(gtas.values[mask], feedback.values[mask])
-
-            fb_coef[(tip, fbn)] = res
+            fb_coef[(tip, fbn)] = regre_with_err(gtas, feedback, bootstrap_error=True)
 
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
                 feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip +".nc", decode_times=time_coder) 
+                feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
                 start_year = int(feedbacks_pattern.year.min())
-                feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num * num).mean('year')
+                feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+                
                 # Perform regression at each grid point
                 slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
                 fb_pattern[(tip, fbn)] = (slope, stderr)
                 slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
                 stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
-    
-    start_year = int(dRt[('cld', 'cloud')].year.min())
-    feedback=dRt[('cld', 'cloud')].groupby((dRt[('cld', 'cloud')].year-start_year) // num * num).mean()
-    fb_coef[('cld', 'cloud')] = stats.linregress(gtas, feedback)
 
-    # mask = np.isfinite(gtas.values) & np.isfinite(feedback.values)
-    # fb_coef[('cld', 'cloud')] = stats.linregress(gtas.values[mask], feedback.values[mask])
-    
+    for fbn in cloud_fbnams:
+        dRt[('cld', fbn)]=dRt[('cld', fbn)].groupby('time.year').mean('time')
+        start_year = int(dRt[('cld', fbn)].year.min())
+        feedback=dRt[('cld', fbn)].groupby((dRt[('cld', fbn)].year-start_year) // num_year_fb * num_year_fb).mean()
+        
+        fb_coef[('cld', fbn)] = regre_with_err(gtas, feedback, bootstrap_error=True)
+
+        if save_pattern:
+            print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
+            # Open the dRt pattern
+            feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern.nc", decode_times=time_coder) 
+            feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
+            start_year = int(feedbacks_pattern.year.min())
+            feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
+            feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+            
+            # Perform regression at each grid point
+            slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
+            fb_pattern[(tip, fbn)] = (slope, stderr)
+            slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn + ".nc", format="NETCDF4")
+            stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn + ".nc", format="NETCDF4")
+
     return {
         "fb_coeffs": fb_coef,
         "fb_pattern": fb_pattern if save_pattern else None,
     }
+
+def regre_with_err(gtas, feedback, bootstrap_error = True):
+    """
+    1D regression with error. Choose among bootstrap and error from stats.linregress.
+    """
+    res = stats.linregress(gtas, feedback)
+
+    if not bootstrap_error:
+        return res
+    else: 
+        x = np.asarray(gtas)
+        y = np.asarray(feedback)
+        bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+    
+        fb_coef = SimpleNamespace(
+            slope=res.slope,
+            intercept=res.intercept,
+            rvalue=res.rvalue,
+            pvalue=res.pvalue,
+            stderr=bs.standard_error,
+            ci_low=bs.confidence_interval.low,
+            ci_high=bs.confidence_interval.high,
+            )
+    
+        return fb_coef
 
 def calc_inter(ds: xr.DataArray, running_years: int) -> xr.DataArray:
     """
@@ -2468,7 +2689,7 @@ def calc_inter(ds: xr.DataArray, running_years: int) -> xr.DataArray:
     trend=ds-med
     return trend
 
-def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, running_years: int = 25) -> dict[str, Any]:    
+def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, running_years: int = 25, fbnams: list[str] = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo'], cloud_fbnams: list[str] = ['cloud', 'cloud-lw', 'cloud-sw']) -> dict[str, Any]:    
     """
     Compute interannual radiative feedback coefficients using kernel-based anomalies
     and global temperature variability.
@@ -2490,6 +2711,10 @@ def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Ker
         If True, computes and saves the full spatial feedback patterns.
     running_years
         Window size (in years) used to compute the running mean.
+    fbnams : list of str, optional
+        List of standard clear-sky/all-sky feedback names to compute.
+    cloud_fbnams : list of str, optional
+        List of cloud-specific feedback names to compute.
 
     Returns
     -------
@@ -2497,37 +2722,24 @@ def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Ker
         A dictionary containing:
         - "fb_coeffs": A dictionary mapping `(sky_condition, feedback_name)` to SciPy linear regression results.
         - "fb_pattern": A dictionary of spatial feedback patterns (slope and standard error) if `save_pattern` is True.
-    """
-    print('planck surf')
-    path = os.path.join(cart_out, "dRt_planck-surf_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_surf(experiment, kernel, cart_out, save_pattern)
-    
-    print('albedo')
-    path = os.path.join(cart_out, "dRt_albedo_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_albedo(experiment, kernel, cart_out, save_pattern)
-    
-    print('planck atm')
-    path = os.path.join(cart_out, "dRt_planck-atmo_global_cld.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
-    
-    print('w-v')
-    path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern) 
 
-    print('cloud')
-    path = os.path.join(cart_out, "dRt_cloud_global.nc")
-    if not os.path.exists(path):
-        Rad_anomaly_cloud(experiment, control, cart_out)
-    
+    """ 
+
+    try:
+        #dRt_all e dRt_all_cloud non sono passati come parametri, stiamo forzando 
+        #l'uso di variabili esterne ignorando fbnams/cloud_fbnams forniti in input?
+        dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
+    except Exception as exp:
+        print(exp)
+        _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
+        dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
+
+    #stiamo sovrascrivendo l'input fbnams dell'utente annullando il parametro.
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     dRt={}
     fb_coef = dict()
     fb_pattern = dict()
-    dRt=open_dRt(cart_out)
+    dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
 
     #compute gtas
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
@@ -2541,17 +2753,16 @@ def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Ker
     print('feedback calculation...')
     for tip in ['clr', 'cld']:
         for fbn in fbnams:
+            dRt[(tip, fbn)]=dRt[(tip, fbn)].groupby('time.year').mean('time')
             inter=calc_inter(dRt[(tip, fbn)], running_years)
 
-            res = stats.linregress(temp,inter)
-            # mask = np.isfinite(temp.values) & np.isfinite(inter.values)
-            # res = stats.linregress(temp.values[mask], inter.values[mask])
+            fb_coef[(tip, fbn)] = regre_with_err(temp, inter, bootstrap_error=True)
 
-            fb_coef[(tip, fbn)] = res
             if save_pattern:
                 print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
                 # Open the dRt pattern
                 feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern_"+tip+ ".nc", decode_times=time_coder)
+                feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
                 feedbacks_pattern_dec=calc_inter(feedbacks_pattern, running_years)              
 
                 feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
@@ -2559,23 +2770,38 @@ def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Ker
                 # Perform regression at each grid point
                 slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas1)
                 fb_pattern[(tip, fbn)] = (slope, stderr)
-                slope.to_netcdf(cart_out + "feedback_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
-                stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ fbn +"_" + tip +  ".nc", format="NETCDF4")
+                slope.to_netcdf(cart_out + "feedback_int_pattern_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
+                stderr.to_netcdf(cart_out + "feedback_int_pattern_error_"+ fbn +"_" + tip +  ".nc", format="NETCDF4")
 
     #cloud
-    inter=calc_inter(dRt[('cld', 'cloud')], running_years)
-    res = stats.linregress(temp,inter)
-    # mask = np.isfinite(temp.values) & np.isfinite(inter.values)
-    # res = stats.linregress(temp.values[mask], inter.values[mask])
+    for fbn in cloud_fbnams:
+        dRt[('cld', fbn)]=dRt[('cld', fbn)].groupby('time.year').mean('time')
+        inter=calc_inter(dRt[('cld', fbn)], running_years)
+        
+        fb_coef[('cld', fbn)] = regre_with_err(temp, inter, bootstrap_error=True)
+        
+        if save_pattern:
+            print(f"Computing spatial feedback pattern for {tip}-{fbn}...")
+            # Open the dRt pattern
+            feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+fbn+"_pattern.nc", decode_times=time_coder) 
+            feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
+            feedbacks_pattern_dec=calc_inter(feedbacks_pattern, running_years)
 
-    fb_coef['cld', 'cloud'] = res
-    
+            feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+            temp = temp.chunk({'year': -1})
+            
+            # Perform regression at each grid point
+            slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, temp)
+            fb_pattern[('cld', fbn)] = (slope, stderr)
+            slope.to_netcdf(cart_out + "feedback_int_pattern_"+ fbn + ".nc", format="NETCDF4")
+            stderr.to_netcdf(cart_out + "feedback_int_pattern_error_"+ fbn + ".nc", format="NETCDF4")
+
     return {
         "fb_coeffs": fb_coef,
         "fb_pattern": fb_pattern if save_pattern else None,
-    }    
+    }
 
-def single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out: str, control: Experiment = None, use_strat_mask: bool = True, save_pattern: bool = False, num: int = 10) -> dict[str, Any]:
+def calc_single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out: str, control: Experiment | None = None, use_strat_mask: bool = True, save_pattern: bool = False, num_year_fb: int = 10) -> dict[str, Any]:
     """
     Computes and extracts the linear regression feedback for a single specific variable. 
     This function extracts or computes a radiative feedback component,
@@ -2598,13 +2824,15 @@ def single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out:
         If True, masks stratospheric temperature changes.
     save_pattern
         If True, saves the spatial anomaly patterns during anomaly computation.
-    num
-        Number of years per chunk for temporal averaging.
-
+    num_year_fb : int, default 10
+        Number of years per chunk for temporal averaging (default is decadal).
+    
     Returns
     -------
-    fb
-        A dictionary mapping the `(sky_condition, feedback_name)` to SciPy linear regression results.
+    dict
+        A dictionary containing:
+        - "fb_coeffs": A dictionary mapping `(sky_condition, feedback_name)` to SciPy linear regression results.
+        - "fb_pattern": A dictionary of spatial feedback patterns if `save_pattern` is True, else None.
     
     Notes
     -----
@@ -2625,9 +2853,10 @@ def single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out:
     Cloud feedback is treated separately because it does not follow the same
     clear-sky / all-sky decomposition structure as other components.
     """
+
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
-    gtas = gtas.groupby((gtas.year-start_year) // num * num).mean()
+    gtas = gtas.groupby((gtas.year-start_year) // num_year_fb * num_year_fb).mean()
     
     if name != 'cloud':
         path = os.path.join(cart_out, "dRt_"+name+"_global_clr.nc")
@@ -2651,27 +2880,39 @@ def single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart_out:
             Rad_anomaly_planck_atm_lr(experiment, kernel, cart_out, use_strat_mask, save_pattern)
         
         elif name == 'cloud':
-            Rad_anomaly_cloud(experiment, control, cart_out)
+            Rad_anomaly_cloud(experiment, cart_out)
     
     fb=dict()
     if name!='cloud':
         for tip in ['clr', 'cld']:
             feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global_"+tip+".nc",  decode_times=time_coder)
+            feedbacks=feedbacks.groupby('time.year').mean('time')
             start_year = int(feedbacks.year.min())
-            feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
+            feedback=feedbacks.groupby((feedbacks.year-start_year) // num_year_fb * num_year_fb).mean()
 
-            res = stats.linregress(gtas, feedback)
-            # mask = np.isfinite(gtas.values) & np.isfinite(feedback.values)
-            # res = stats.linregress(gtas.values[mask], feedback.values[mask])
-
-            fb[(tip, name)] = res
+            fb[(tip, name)] = regre_with_err(gtas, feedback, bootstrap_error=True)
     else:
         feedbacks=xr.open_dataarray(cart_out+"dRt_" +name+"_global.nc",  decode_times=time_coder)
+        feedbacks=feedbacks.groupby('time.year').mean('time')
         start_year = int(feedbacks.year.min())
-        feedback=feedbacks.groupby((feedbacks.year-start_year) // num * num).mean()
-        fb = stats.linregress(gtas, feedback)
+        feedback=feedbacks.groupby((feedbacks.year-start_year) // num_year_fb * num_year_fb).mean()
 
-        # mask = np.isfinite(gtas.values) & np.isfinite(feedback.values)
-        # fb[('cld', 'cloud')] = stats.linregress(gtas.values[mask], feedback.values[mask])
+        fb = regre_with_err(gtas, feedback, bootstrap_error=True)
 
-    return fb
+        if save_pattern:
+            print(f"Computing spatial feedback pattern for {tip}-{name}...")
+            # Open the dRt pattern
+            feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+name+"_pattern_"+tip +".nc", decode_times=time_coder) 
+            start_year = int(feedbacks_pattern.year.min())
+            feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
+            feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
+            # Perform regression at each grid point
+            slope, stderr = regress_pattern_vectorized(feedbacks_pattern_dec, gtas)
+            fb_pattern= (slope, stderr)
+            slope.to_netcdf(cart_out + "feedback_pattern_"+ name +"_" + tip + ".nc", format="NETCDF4")
+            stderr.to_netcdf(cart_out + "feedback_pattern_error_"+ name +"_" + tip + ".nc", format="NETCDF4")
+
+    return {
+        "fb_coeffs": fb,
+        "fb_pattern": fb_pattern if save_pattern else None,
+        }
