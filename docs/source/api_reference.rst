@@ -33,7 +33,7 @@ Core functions to calculate radiative anomalies and climate feedbacks.
 .. autofunction:: spectfbcalc_lib.calc_anoms
 .. autofunction:: spectfbcalc_lib.calc_fb
 .. autofunction:: spectfbcalc_lib.calc_fb_interannual
-.. autofunction:: spectfbcalc_lib.single_feedback
+.. autofunction:: spectfbcalc_lib.calc_single_feedback
 
 Radiative Anomalies (Individual)
 --------------------------------
