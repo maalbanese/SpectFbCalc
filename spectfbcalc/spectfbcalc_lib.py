@@ -151,7 +151,7 @@ class Kernel:
         experiment 
             An instance of the Experiment class containing the model's surface pressure data.
         """
-        if "surf_pressure" not in experiment.ds:
+        if experiment.surf_pressure is None:
             print(f"Surface pressure not available in experiment {experiment.name}, using default dp for kernel {self.name}")
             return
 
@@ -409,6 +409,7 @@ class Experiment:
         else:
             self.load_raw()
             self.remap(target_ds=target_grid_ds, save_remapped=True)
+            self.load_remapped()
 
     def _resolve_target_grid(self, target_grid_file: str | Path | xr.Dataset | xr.DataArray) -> str:
         """
@@ -448,7 +449,7 @@ class Experiment:
         else:
             return str(target_grid_file)
 
-    def remap(self, target_ds: xr.Dataset | xr.DataArray, save_remapped: bool = False) -> None:
+    def remap(self, target_ds: xr.Dataset | xr.DataArray, save_remapped: bool = True) -> None:
         """
         Interpolates the raw data to the horizontal grid of the target dataset.
  
@@ -467,7 +468,7 @@ class Experiment:
                 print(var)
                 ds.to_netcdf(os.path.join(self.remap_dir, f'{var}_{self.name}_remapped.nc'))
             
-        self.ds = xr.merge([remapped[var] for var in remapped])
+        # self.ds = xr.merge([remapped[var] for var in remapped])
 
 
     def remap_cdo(self, target_grid_file: str | Path | xr.Dataset | xr.DataArray, method: str = "remapbil") -> None:
@@ -619,10 +620,15 @@ class Experiment:
         """
         if not pressure_path:
             print("No pressure path provided.")
+            self.surf_pressure = None
             return
 
         print("Loading surface pressure data...")
-        ps_files = sorted(glob.glob(pressure_path))
+        if isinstance(pressure_path, list):
+            ps_files = pressure_path
+        else:
+            ps_files = sorted(glob.glob(pressure_path))
+
         if not ps_files:
             raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
         
@@ -1313,6 +1319,8 @@ def load_config(config_file: str | Path, variable_mapping_file: str | Path | Non
     config['lat_range']=lat_range
     config['lon_range']=lon_range
 
+    if 'control_type' not in config: config['control_type'] = 'PI'
+    if 'exp_type' not in config: config['exp_type'] = '4x'
    
     config['pressure_path'] = config['file_paths'].get('pressure_data', None)
 
@@ -1325,7 +1333,7 @@ def load_config(config_file: str | Path, variable_mapping_file: str | Path | Non
     return config
 
 
-def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: set[str] | list[str] | tuple[str] = STD_VARS_NOALB, save_remapped: bool = True, variable_mapping_file: str | Path | None = None, control_file_dict: dict | None = None, exp_file_dict: dict | None = None, wv_method_spectral: str = 'hybrid', exp_name: str | None = None) -> tuple[Experiment, Experiment, Kernel]:
+def preprocess_data(config_file: str | Path = "config_example.yml", config: dict = None, ker: str = "HUANG", raw_variables: set[str] | list[str] | tuple[str] = STD_VARS_NOALB, save_remapped: bool = True, variable_mapping_file: str | Path | None = None, control_file_dict: dict | None = None, exp_file_dict: dict | None = None, wv_method_spectral: str = 'hybrid', exp_name: str | None = None) -> tuple[Experiment, Experiment, Kernel]:
     """
     Orchestrates the data preparation sequence before feedback calculation.
 
@@ -1334,6 +1342,8 @@ def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: 
 
     Parameters
     ----------
+    config
+        Dictionary with configurable options, paths, ecc.
     config_file
         Path to the configuration YAML file.
     ker
@@ -1363,17 +1373,10 @@ def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: 
     kernel
         The loaded `Kernel` object.
     """
-    
+
     # load config
-    config = load_config(config_file, variable_mapping_file = variable_mapping_file)
-    if exp_name is not None:
-        print(f'new exp_name: {exp_name}')
-        cart_out = config['file_paths'].get("output")
-        ## Create dirs
-        cart_out_exp = cart_out + f'/{exp_name}/'
-        os.makedirs(cart_out_exp, exist_ok=True)
-        config['cart_out_exp'] = cart_out_exp
-        config['exp_name'] = exp_name
+    if config is None:
+        config = load_config(config_file, variable_mapping_file = variable_mapping_file)
 
     # load kernel
     kernel = Kernel(ker, config = config, wv_method_spectral=wv_method_spectral)
@@ -1394,7 +1397,7 @@ def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: 
     
     # load picontrol (+ remap)
     print('\n -------> Loading control')
-    control = Experiment('PI', config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], chunks_remap = chunks_remap, file_dict = control_file_dict)
+    control = Experiment(config['control_type'], config['file_paths']['reference_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], chunks_remap = chunks_remap, file_dict = control_file_dict)
 
     control.prepare_input_dataset(target_grid_ds=k)
     control.check_coords() 
@@ -1405,7 +1408,7 @@ def preprocess_data(config_file: str | Path, ker: str = "HUANG", raw_variables: 
 
     # load 4x (+ remap)
     print('\n -------> Loading experiment')
-    experiment = Experiment('4x', config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], chunks_remap = chunks_remap, file_dict = exp_file_dict)
+    experiment = Experiment(config['exp_type'], config['file_paths']['experiment_dataset'], remap_dir = config['cart_out_exp'] + f"remapped_{ker}/", raw_variables = raw_variables, variable_mapping = config['variable_mapping'], chunks_remap = chunks_remap, file_dict = exp_file_dict)
     
     experiment.prepare_input_dataset(target_grid_ds=k)
     experiment.check_coords() 
@@ -1554,7 +1557,7 @@ def mask_strato(ta: xr.DataArray) -> xr.DataArray:
     Generates a mask for atmospheric temperature data based on the lapse rate threshold,
     following Reichler et al. (2003).
 
-    The lapse rate $\Gamma$ is calculated between adjacent pressure levels.
+    The lapse rate Gamma is calculated between adjacent pressure levels.
 
     Parameters
     ----------
@@ -2265,12 +2268,12 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
             dRt.attrs["description"] = f"{tip} water vapor dRt pattern"
             dRt.to_netcdf(cart_out + "dRt_water-vapor_pattern_" + tip + ".nc", format="NETCDF4")
             if kernel.name != 'SPECTRAL':
-                dRt_lw.name = "dRt_lw"
+                dRt_lw.name = 'water-vapor-lw'
                 dRt_lw.attrs["description"] = f"{tip} water vapor dRt_lw pattern"
-                dRt_lw.to_netcdf(cart_out + "dRt_lw_water-vapor_pattern_" + tip +  ".nc", format="NETCDF4")
-                dRt_sw.name = "dRt_sw"
+                dRt_lw.to_netcdf(cart_out + "dRt_water-vapor-lw_pattern_" + tip +  ".nc", format="NETCDF4")
+                dRt_sw.name = 'water-vapor-sw'
                 dRt_sw.attrs["description"] = f"{tip} water vapor dRt_sw pattern"
-                dRt_sw.to_netcdf(cart_out + "dRt_sw_water-vapor_pattern_" + tip +  ".nc", format="NETCDF4")
+                dRt_sw.to_netcdf(cart_out + "dRt_water-vapor-sw_pattern_" + tip +  ".nc", format="NETCDF4")
 
         print('Before WV computation')
 

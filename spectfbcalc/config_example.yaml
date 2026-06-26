@@ -14,6 +14,9 @@ file_paths:
    pressure_data: "" #to specify if you have ps values in a different file and not in an array
    output: "/path/to/output/"
 
+control_type: 'PI'
+exp_type: '4x'
+
 exp_name: "model_1"
 
 anomaly_method: "" #specify the anomaly method: climatology, running_m, climatology_mean, running_m_mean
