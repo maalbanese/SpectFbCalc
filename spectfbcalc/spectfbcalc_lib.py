@@ -633,7 +633,13 @@ class Experiment:
             raise FileNotFoundError(f"No matching pressure files found for pattern: {pressure_path}")
         
         surf_pressure = xr.open_mfdataset(ps_files, combine='by_coords', decode_times=time_coder, preprocess=preproc)
-        ps_var_name = 'ps' if 'ps' in surf_pressure.data_vars else list(surf_pressure.data_vars)[0]
+        if 'ps' in surf_pressure.data_vars: 
+            ps_var_name = 'ps' 
+        elif len(surf_pressure.data_vars) == 1:
+            ps_var_name = list(surf_pressure.data_vars)[0]
+        else:
+            raise ValueError(f'surf pressure not found among: {surf_pressure.data_vars}')
+
         is_ps_unstructured = 'cell' in surf_pressure.dims
 
         if is_ps_unstructured:
@@ -663,7 +669,11 @@ class Experiment:
         print("Computing climatology on remapped surface pressure...")
         psclim = ps_mapped.groupby('time.month').mean(dim='time')
         psye = psclim.mean('month')
-        self.surf_pressure = psye.compute()
+
+        psye.load()
+        psye = check_surf_pressure(psye)
+
+        self.surf_pressure = psye
         print("Surface pressure successfully loaded, remapped and averaged.")
     
 
@@ -1517,19 +1527,52 @@ def check_vertical(da: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
         Object with corrected 'plev' units.
     """
     plev = da.coords["plev"]
-    #units = plev.attrs.get("units")
- 
-    min_val = float(plev.min())
+    
+    if hasattr(plev, 'units'):
+        units = plev.units
+    else:
+        max_val = float(plev.max())
+        units = 'Pa' if max_val > 10000 else 'hPa'
 
-    # Se minimo > 50 → probabilmente in Pa → convertiamo
-    if min_val > 50:
+    if units == 'Pa':
+        print('Converting vertical coordinates from Pa to hPa')
         new_plev = plev / 100.0
         new_plev.attrs["units"] = "hPa"
-        print('Rewriting vertical coordinates from Pa to hPa')
         # Riassegna la coordinata convertita
         da = da.assign_coords(plev=new_plev)
 
     return da
+
+
+def check_surf_pressure(da: xr.DataArray) -> xr.DataArray:
+    """
+    Inspects the units of surface pressure and converts from Pascals to hPa if needed.
+    
+    Parameters
+    ----------
+    da
+        DataArray of surf pres.
+
+    Returns
+    -------
+    da
+        Object with corrected units.
+    """
+    
+    if hasattr(da, 'units'):
+        units = da.units
+    else:
+        max_val = float(da.max())
+        units = 'Pa' if max_val > 10000 else 'hPa'
+
+    if units == 'Pa':
+        print('Converting surf pres from Pa to hPa')
+        da = da / 100.0
+        da.attrs["units"] = "hPa"
+
+    return da
+
+
 
 def preproc(ds: xr.Dataset) -> xr.Dataset:
     """
