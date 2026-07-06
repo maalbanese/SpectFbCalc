@@ -1080,7 +1080,7 @@ def load_spectral_kernel(cart_k: str) -> tuple[dict[tuple[str, str], xr.DataArra
         "temp_jac": "t",
         "ts_jac":   "ts",
         "linear_wv_jac":   "wv_lw_lin",
-        "logaritmic_wv_jac":   "wv_lw_log",
+        "logarithmic_wv_jac":   "wv_lw_log",
         "ozo_jac":   "ozo",
         "co2_jac":   "co2",
         "ch4_jac":   "ch4",
@@ -2961,7 +2961,37 @@ def calc_single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart
         "fb_pattern": fb_pattern if save_pattern else None,
         }
 
-def calc_fb_spectral(experiment, control, kernel, cart_out, use_strat_mask=True, save_pattern=False, num_year_fb=10):
+def calc_fb_spectral(experiment: Experiment, kernel: Kernel, cart_out: str, control:  Experiment | None = None,  use_strat_mask: bool = True, save_pattern: bool = False, num_year_fb: int = 10) -> dict[tuple[str, str], tuple[xr.DataArray, xr.DataArray]]:
+
+    """
+    Compute full radiative feedback decomposition and interannual regression
+    against global mean surface temperature for spectral datas.
+
+    Parameters
+    ----------
+    experiment
+        Instance containing the model datasets and anomalies.
+    kernel
+        Instance containing the loaded radiative kernels.
+    cart_out
+        Output directory where results and intermediate files will be saved.
+    control
+        Instance containing the control run datasets.
+    use_strat_mask
+        If True, masks stratospheric temperature changes when computing atmospheric feedbacks.
+    save_pattern
+        If True, computes and saves the full spatial feedback patterns.
+    num_year_fb : int, default 10
+        Number of years per chunk for temporal averaging (default is decadal).
+    
+    Returns
+    -------
+    dict[tuple[str, str], tuple[xr.DataArray, xr.DataArray]]
+        Dictionary mapping `(sky_condition, feedback_name)` to a tuple
+        `(slope, stderr)`, where both elements are `xarray.DataArray`
+        objects containing the regression coefficient and its standard error.
+
+    """
 
     gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
     start_year = int(gtas.year.min()) 
@@ -2970,7 +3000,7 @@ def calc_fb_spectral(experiment, control, kernel, cart_out, use_strat_mask=True,
 
     _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern, force_recompute=False)
     
-    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'lw_water-vapor']
+    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor-lw']
     dRt={}
     fb_coef = dict()
     dRt=open_dRt(cart_out, fbnams)
@@ -2981,7 +3011,7 @@ def calc_fb_spectral(experiment, control, kernel, cart_out, use_strat_mask=True,
             start_year = int(dRt[(tip, fbn)].year.min())
             feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num_year_fb * num_year_fb).mean()
             feedback=feedback.chunk({'year': -1})
-            slope, stderr = sfc.regress_pattern_vectorized(feedback, gtas)
+            slope, stderr = regress_pattern_vectorized(feedback, gtas)
             fb_coef[(tip, fbn)]= (slope, stderr)
             slope.to_netcdf(cart_out + "feedback_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
             stderr.to_netcdf(cart_out + "feedback_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
