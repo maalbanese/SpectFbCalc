@@ -1080,7 +1080,7 @@ def load_spectral_kernel(cart_k: str) -> tuple[dict[tuple[str, str], xr.DataArra
         "temp_jac": "t",
         "ts_jac":   "ts",
         "linear_wv_jac":   "wv_lw_lin",
-        "logaritmic_wv_jac":   "wv_lw_log",
+        "logarithmic_wv_jac":   "wv_lw_log",
         "ozo_jac":   "ozo",
         "co2_jac":   "co2",
         "ch4_jac":   "ch4",
@@ -2525,7 +2525,7 @@ def calc_anoms(experiment: Experiment, control: Experiment, kernel: Kernel, cart
     if kernel.name != 'SPECTRAL':
         path = os.path.join(cart_out, "dRt_water-vapor_global_clr.nc")
     else:
-        path = os.path.join(cart_out, "dRt_lw_water-vapor_global_clr.nc")
+        path = os.path.join(cart_out, "dRt_water-vapor-lw_global_clr.nc")
     if not os.path.exists(path) or force_recompute:
         anom_wv = Rad_anomaly_wv(experiment, control, kernel, cart_out, use_strat_mask, save_pattern)
     else:
@@ -2620,7 +2620,7 @@ def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_ou
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
     except Exception as exp:
         print(exp)
-        _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
+        _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern, force_recompute=False)
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
 
     fb_coef = dict()
@@ -2775,7 +2775,7 @@ def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Ker
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
     except Exception as exp:
         print(exp)
-        _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern)
+        _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern, force_recompute=False)
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
 
     fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
@@ -2946,6 +2946,7 @@ def calc_single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart
             print(f"Computing spatial feedback pattern for {tip}-{name}...")
             # Open the dRt pattern
             feedbacks_pattern = xr.open_dataarray(cart_out+"dRt_"+name+"_pattern_"+tip +".nc", decode_times=time_coder) 
+            feedbacks_pattern = feedbacks_pattern.groupby('time.year').mean('time')
             start_year = int(feedbacks_pattern.year.min())
             feedbacks_pattern_dec = feedbacks_pattern.groupby((feedbacks_pattern.year - start_year) // num_year_fb * num_year_fb).mean('year')
             feedbacks_pattern_dec = feedbacks_pattern_dec.chunk({'year': -1})
@@ -2959,3 +2960,60 @@ def calc_single_feedback(name: str, experiment: Experiment, kernel: Kernel, cart
         "fb_coeffs": fb,
         "fb_pattern": fb_pattern if save_pattern else None,
         }
+
+def calc_fb_spectral(experiment: Experiment, kernel: Kernel, cart_out: str, control:  Experiment | None = None,  use_strat_mask: bool = True, save_pattern: bool = False, num_year_fb: int = 10) -> dict[tuple[str, str], tuple[xr.DataArray, xr.DataArray]]:
+
+    """
+    Compute full radiative feedback decomposition and interannual regression
+    against global mean surface temperature for spectral datas.
+
+    Parameters
+    ----------
+    experiment
+        Instance containing the model datasets and anomalies.
+    kernel
+        Instance containing the loaded radiative kernels.
+    cart_out
+        Output directory where results and intermediate files will be saved.
+    control
+        Instance containing the control run datasets.
+    use_strat_mask
+        If True, masks stratospheric temperature changes when computing atmospheric feedbacks.
+    save_pattern
+        If True, computes and saves the full spatial feedback patterns.
+    num_year_fb : int, default 10
+        Number of years per chunk for temporal averaging (default is decadal).
+    
+    Returns
+    -------
+    dict[tuple[str, str], tuple[xr.DataArray, xr.DataArray]]
+        Dictionary mapping `(sky_condition, feedback_name)` to a tuple
+        `(slope, stderr)`, where both elements are `xarray.DataArray`
+        objects containing the regression coefficient and its standard error.
+
+    """
+
+    gtas = ctl.global_mean(experiment.ds_anom['tas']).groupby('time.year').mean('time')
+    start_year = int(gtas.year.min()) 
+    gtas = gtas.groupby((gtas.year-start_year) // num_year_fb * num_year_fb).mean()
+    gtas= gtas.chunk({'year': -1})
+
+    _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern, force_recompute=False)
+    
+    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor-lw']
+    dRt={}
+    fb_coef = dict()
+    dRt=open_dRt(cart_out, fbnams)
+
+    for tip in ['clr', 'cld']:
+        for fbn in fbnams:
+            dRt[(tip, fbn)]=dRt[(tip, fbn)].groupby('time.year').mean('time')
+            start_year = int(dRt[(tip, fbn)].year.min())
+            feedback=dRt[(tip, fbn)].groupby((dRt[(tip, fbn)].year-start_year) // num_year_fb * num_year_fb).mean()
+            feedback=feedback.chunk({'year': -1})
+            slope, stderr = regress_pattern_vectorized(feedback, gtas)
+            fb_coef[(tip, fbn)]= (slope, stderr)
+            slope.to_netcdf(cart_out + "feedback_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
+            stderr.to_netcdf(cart_out + "feedback_error_"+ fbn +"_" + tip + ".nc", format="NETCDF4")
+
+    return fb_coef
