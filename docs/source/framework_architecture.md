@@ -45,7 +45,7 @@ The entire process preserves dask’s lazy evaluation until the very last possib
 - Extracting coordinate vectors and surface pressure for loops on geographical nodes.
 While these preprocessing modules are essential for standardizing datasets, SpectFbCalc is designed with a modular architecture that allows users to bypass these steps and interface directly with core functions if their inputs are already harmonized. 
 
-[^1]: Huang, H., & Huang, Y. (2023). Radiative sensitivity quantified by a new set of radiation flux kernels  based on the ECMWF Reanalysis v5 (ERA5). Earth System Science Data, 15(7), 3001–3021. https://doi.org/10.5194/essd-15-3001-2023
-[^2]: Soden, B. J., Held, I. M., Colman, R., Shell, K. M., Kiehl, J. T., & Shields, C. A. (2008). Quantifying Climate Feedbacks Using Radiative Kernels. Journal of Climate, 21(14), 3504–3520. https://doi.org/https://doi.org/10.1175/2007JCLI2110.1
+[^1]: Huang, Y., Y. Xia, and X. Tan (2017), On the pattern of CO2 radiative forcing and poleward energy transport, J. Geophys. Res. Atmos., 122, 10,578–10,593. https://doi.org/10.1002/2017JD027221 
+[^2]: Huang, H., & Huang, Y. (2023). Radiative sensitivity quantified by a new set of radiation flux kernels  based on the ECMWF Reanalysis v5 (ERA5). Earth System Science Data, 15(7), 3001–3021. https://doi.org/10.5194/essd-15-3001-2023
 [^3]: Della Fera, S., Fabiano, F., Raspollini, P., Ridolfi, M., Von Hardenberg, J., & Cortesi, U. (2025). Reproducing and Attributing IASI Radiance Trends with EC-Earth Climate Model Simulations. Journal of Climate, 38(23), 6943-6959. https://doi.org/10.1175/JCLI-D-25-0034.1 
 [^4]: Reichler, T., M. Dameris, and R. Sausen (2003), Determining the tropopause height from gridded data, Geophys. Res. Lett., 30, 20. https://doi.org/10.1029/2003GL018240

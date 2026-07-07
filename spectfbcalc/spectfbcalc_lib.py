@@ -10,9 +10,9 @@ remapping, computation of climatologies and anomalies, and linear regression
 analysis for feedback quantification.
 
 Supported Radiative Kernels:
-    * HUANG (Huang et Huang, 2023)
-    * ERA5 (Soden et al., 2008)
-    * SPECTRAL
+    * HUANG 
+    * ERA5 (Huang et Huang, 2023)
+    * SPECTRAL (Huang, Y., Y. Xia, and X. Tan, 2017)
 
 Dependencies:
     * xarray, dask, numpy, scipy, pandas
