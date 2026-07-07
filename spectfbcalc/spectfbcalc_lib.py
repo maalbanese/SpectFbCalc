@@ -589,6 +589,7 @@ class Experiment:
         files = sorted(self.remap_dir.glob(pattern))
         if len(files) > 0:
             self.ds = xr.open_mfdataset(files, combine = "by_coords", decode_times=time_coder, chunks = self.chunks_remap, preprocess = preproc)
+            self.ds = self.ds.chunk(self.chunks_remap)
         else:
             raise ValueError('No remapped dataset found on disk!')
             # Alternatively, can compute them from raw
@@ -1595,7 +1596,7 @@ def preproc(ds: xr.Dataset) -> xr.Dataset:
 
 ######################################################################################
 
-def mask_strato(ta: xr.DataArray) -> xr.DataArray:
+def mask_strato(ta: xr.DataArray, debug = False) -> xr.DataArray:
     """
     Generates a mask for atmospheric temperature data based on the lapse rate threshold,
     following Reichler et al. (2003).
@@ -1614,44 +1615,84 @@ def mask_strato(ta: xr.DataArray) -> xr.DataArray:
         - Values are 1 where the lapse rate is less than or equal to -2 K/km.
         - Values are NaN elsewhere.
     """
-    p=ta.plev
-    n=ta.sizes['plev']
-    #costanti
-    g=9.81 #gravity
-    cp=1005 #specific heat capacity of air at costant pressure
-    R= 0.2870 #gas costant for dry air
-    k=R/cp
+
+    pres = sorted(ta.plev.values)[::-1] # pressure in descending order (from surface to TOA), converted to Pa
+    pres_m1 = pres[1:] # pressure in descending order (from surface to TOA)
+
+    plev_order = 1 # plev in right order (from surf to TOA)
+    if ta.plev.values[1]-ta.plev.values[0] > 0:
+        plev_order = 0 # plev in reverse order
+        print('WARNING: plev is in the inverse order! (might affect mask)')
+    
+    # Physical constants
+    g = 9.81 #gravity
+    cp = 1005 #specific heat capacity of air at costant pressure
+    R = 287 #gas costant for dry air
+    k = R/cp
 
     result=[]
     plevs=[]
-    for i in range (0, n-1):
-        lev1_P=(p.isel(plev=i)).item()
-        lev1_T=ta.sel(plev= lev1_P)
-        lev2_P=(p.isel(plev=i+1)).item()
-        lev2_T=ta.sel(plev= lev2_P)
-        a=(lev2_T-lev1_T)
-        b=((lev2_P*100)**k -(lev1_P*100)**k) #*100 bc datas are in hPa
-        c=((lev1_P*100)**k+(lev2_P*100)**k)
-        d=(lev1_T+lev2_T)
+
+    for lev1_P, lev2_P in zip(pres, pres_m1):
+        lev1_T=ta.sel(plev=lev1_P)
+        lev2_T=ta.sel(plev=lev2_P)
+        a=(lev2_T - lev1_T)
+        b=(lev2_P**k - lev1_P**k) #*100 bc datas are in hPa
+        c=(lev1_P**k + lev2_P**k)
+        d=(lev1_T + lev2_T)
         lapse=(a/b)*(c/d)*(k*g/R)
     
-        plevs.append(lev1_P)
+        plev_mean = (c/2)**(1/k)
+        #print(lev1_P, lev2_P, c, plev_mean, lapse.mean())
+        plevs.append(plev_mean)
         result.append(lapse)
-    lapse_da = xr.concat(result, dim="plev").assign_coords(plev=plevs)
-    cond = xr.where(lapse_da.plev < 100, lapse_da <= -2, True)
 
-    mask = cond.astype(int).cumprod("plev")
-    mask = mask.where(mask == 1)
+    lapse_da = xr.concat(result, dim="plev").assign_coords(plev=plevs)
+    lapse_da.name = 'lapse'
+    lapse_da = lapse_da * 1000. # convert to °C/km
+
+    # interpolate on P**k
+    lapse_da = lapse_da.assign_coords(plev_k=('plev', lapse_da.plev.values**k))
+    lapse_da = lapse_da.swap_dims({'plev': 'plev_k'})
+    new_plev_k = ta.plev.values**k
+    # print(new_plev_k)
+    lapse_interp = lapse_da.interp(plev_k=new_plev_k, kwargs={"fill_value": "extrapolate"})
+    # print(lapse_interp.plev)
+    lapse_interp = lapse_interp.assign_coords(plev = ('plev_k', ta.plev.values))
+    lapse_interp = lapse_interp.swap_dims({'plev_k': 'plev'})
+    lapse_interp = lapse_interp.drop_vars('plev_k')
+
+    cond = xr.where((lapse_interp.plev < 550) & (lapse_interp.plev > 75), lapse_interp <= -2, True)
+
+    # This to ensure the levels are in the right order
+    cond_ok = cond.sel(plev = pres)
+
+    # This is to implement the check on the layers in a 2 km range
+    # new_cond = []
+    # for i in range(len(cond_ok.plev)-1):
+    #     cos_1 = cond_ok.isel(plev = i+1)
+    #     cos = cond_ok.isel(plev = i)
+    #     newco = xr.where((cond_ok.isel(plev = i) == 0) , )
+
+    mask = cond_ok.astype(int).cumprod("plev")
+
+    # Restore original order
+    mask = mask.sel(plev = ta.plev)
+
+    #mask = mask.where(mask == 1)
 
     # re-adding the last level with all zeros
-    zero_slice = xr.zeros_like(ta.isel(plev=0)).assign_coords(plev=ta.plev[-1]).expand_dims('plev')
-    mask = xr.concat([mask, zero_slice], dim='plev').transpose(*ta.dims)
+    # zero_slice = xr.zeros_like(ta.sel(plev=pres[-1])).assign_coords(plev=pres[-1]).expand_dims('plev')
+    # mask = xr.concat([mask, zero_slice], dim='plev').transpose(*ta.dims)
     
     if ta.chunks:
         chunk_dic = {dim: chu for dim, chu in zip(ta.dims, ta.chunks)}
         mask = mask.chunk(chunk_dic)
-        
-    return mask
+
+    if debug:    
+        return mask, lapse_da, cond
+    else:
+        return mask
 
 # def mask_pres(surf_pressure: xr.Dataset, cart_out: str, allkers: dict[tuple[str, str], xr.DataArray], config_file: str | None = None) -> xr.DataArray:
 #     """
@@ -2103,7 +2144,7 @@ def Rad_anomaly_planck_atm_lr(experiment: Experiment, kernel: Kernel, cart_out: 
         Full spatial pattern of the lapse-rate anomaly for each condition (clear/cloudy).
     """
     radiation=dict()
-    if use_strat_mask==True:
+    if use_strat_mask:
         mask = mask_strato(experiment.ds['ta'])
         ta_anom = (experiment.ds_anom['ta'] * mask).sel(plev = mask.plev)
     else:
@@ -2262,7 +2303,7 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
     if kernel.name == 'SPECTRAL':
         anoms_hus_log = experiment.ds_anom[wv_name+'_log']
         
-    if use_strat_mask==True:
+    if use_strat_mask:
         mask=mask_strato(experiment.ds['ta'])
         anoms_hus=(anoms_hus * mask).sel(plev = mask.plev)
         if kernel.name == 'SPECTRAL': 
