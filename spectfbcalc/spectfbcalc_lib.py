@@ -2623,7 +2623,7 @@ def open_dRt_pattern(cart_out: str, names: list[str] = dRt_all) -> dict:
                 dRt[('cld', i)] = xr.open_dataarray(cart_out+"dRt_" + i + "_pattern.nc",  decode_times=time_coder)
     return dRt
 
-def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, num_year_fb: int = 10, fbnams: list[str] | None = None, cloud_fbnams: list[str] | None = None) -> dict[str, Any]:
+def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_out: str, use_strat_mask: bool = True, save_pattern: bool = False, num_year_fb: int = 10, fbnams: list[str] = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo'], cloud_fbnams: list[str] | None = None) -> dict[str, Any]:
     """
     Compute full radiative feedback decomposition and interannual regression
     against global mean surface temperature.
@@ -2819,7 +2819,6 @@ def calc_fb_interannual(experiment: Experiment, control: Experiment, kernel: Ker
         _rad_anoms = calc_anoms(experiment, control, kernel, cart_out, use_strat_mask=use_strat_mask, save_pattern=save_pattern, force_recompute=False)
         dRt=open_dRt(cart_out, names = dRt_all + dRt_all_cloud)
 
-    fbnams = ['planck-surf', 'planck-atmo', 'lapse-rate', 'water-vapor', 'albedo']
     dRt={}
     fb_coef = dict()
     fb_pattern = dict()
