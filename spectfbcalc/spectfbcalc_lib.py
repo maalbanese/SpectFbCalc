@@ -10,9 +10,9 @@ remapping, computation of climatologies and anomalies, and linear regression
 analysis for feedback quantification.
 
 Supported Radiative Kernels:
-    * HUANG 
+    * HUANG (Huang, Y. et al., 2017)
     * ERA5 (Huang et Huang, 2023)
-    * SPECTRAL (Huang, Y., Y. Xia, and X. Tan, 2017)
+    * SPECTRAL (Della Fera, s. et al., 2025)
 
 Dependencies:
     * xarray, dask, numpy, scipy, pandas
@@ -2461,6 +2461,11 @@ def Rad_anomaly_cloud(experiment: Experiment, cart_out: str, output_lw_sw: bool 
     -------------
     - dRt_cloud_global.nc
       Global mean of the cloud radiative forcing anomaly.
+
+    If save_pattern is True, also saves:
+
+    - dRt_cloud_pattern.nc
+      Full spatial pattern of the cloud radiative forcing anomaly.
     """
 
     rad_fields = [('net_toa_cs', 'net_toa'), ('rlut', 'rlutcs'), ('rsut', 'rsutcs')]
@@ -2731,9 +2736,27 @@ def calc_fb(experiment: Experiment, control: Experiment, kernel: Kernel, cart_ou
         "fb_pattern": fb_pattern if save_pattern else None,
     }
 
-def regre_with_err(gtas, feedback, bootstrap_error = True):
+def regre_with_err(gtas: np.ndarray, feedback: np.ndarray, bootstrap_error: bool = True) -> Union[Any, SimpleNamespace]:
     """
-    1D regression with error. Choose among bootstrap and error from stats.linregress.
+    Performs a 1D linear regression with optional bootstrap error estimation.
+
+    Parameters
+    ----------
+    gtas
+        The independent variable data (e.g., array-like values).
+    feedback
+        The dependent variable data (e.g., array-like values).
+    bootstrap_error
+        If True, calculates the standard error and confidence intervals using
+        bootstrapping. If False, returns the standard stats.linregress output.
+
+    Returns
+    -------
+    res
+        An object containing regression results (slope, intercept, rvalue, pvalue).
+        If `bootstrap_error` is True, returns a SimpleNamespace with additional
+        bootstrap confidence intervals (`ci_low`, `ci_high`) and `stderr`.
+        Otherwise, returns a `scipy.stats._stats_mstats_common.LinregressResult`.
     """
     res = stats.linregress(gtas, feedback)
 
