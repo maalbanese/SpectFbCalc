@@ -685,6 +685,22 @@ class Experiment:
         print('Creating Net TOA variables')
         self.ds['net_toa'] = self.ds['rsdt'] - self.ds['rlut'] - self.ds['rsut'] #net_toa_allsky
         self.ds['net_toa_cs'] = self.ds['rsdt'] - self.ds['rlutcs'] - self.ds['rsutcs'] #net_toa_clr
+
+
+    def check_hus_log(self) -> None:
+        """
+        Checks if hus_log is in ds. If not, applies log to hus and adds it to the dataset, 
+        removing the original hus. Raises an error if hus is not available.
+        """
+        if not self.ds:
+            raise ValueError('Remapped data not loaded (self.ds is empty)')
+    
+        if 'hus_log' in self.ds.data_vars:
+            print('hus_log already in ds')
+        else:
+            print('Applying log to hus')
+            self.ds['hus_log'] = da.log(self.ds['hus'])
+            del self.ds['hus']   
  
     
     def check_albedo(self) -> None:
@@ -709,20 +725,7 @@ class Experiment:
                 raise ValueError('alb or rsus or rsds not found in ds! Cannot compute albedo. Vars in ds: ', self.ds.data_vars)
 
 
-    def check_hus_log(self) -> None:
-        """
-        Checks if hus_log is in ds. If not, applies log to hus and adds it to the dataset, 
-        removing the original hus. Raises an error if hus is not available.
-        """
-        if not self.ds:
-            raise ValueError('Remapped data not loaded (self.ds is empty)')
-    
-        if 'hus_log' in self.ds.data_vars:
-            print('hus_log already in ds')
-        else:
-            print('Applying log to hus')
-            self.ds['hus_log'] = da.log(self.ds['hus'])
-            del self.ds['hus']
+
     
     def convert_hus_to_vmr(self) -> None:
         """
@@ -2377,12 +2380,19 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
                 dRt_glob_lw_log.load()
                 print(f'Computed log part: {dRt_glob_lw_log.min()} - {dRt_glob_lw_log.max()}')
             elif kernel.wv_method == 'hybrid':
-                dRt_glob_lw_lin = ctl.global_mean(dRt_lw_lin.sel(freq = slice(651., None)))
-                dRt_glob_lw_lin.load()
-                print(f'Computed lin part: {dRt_glob_lw_lin.min()} - {dRt_glob_lw_lin.max()}')
-                dRt_glob_lw_log = ctl.global_mean(dRt_lw_log.sel(freq = slice(0, 650.)))
+                freq = dRt_lw_log['freq']
+                mask_log = ((freq >= 100.) & (freq <= 560.)) | ((freq >= 1350.) & (freq <= 1850.))
+                mask_lin = ~mask_log
+
+                dRt_lw_log_sel = dRt_lw_log.where(mask_log, drop=True).sortby('freq')
+                dRt_glob_lw_log = ctl.global_mean(dRt_lw_log_sel)
                 dRt_glob_lw_log.load()
                 print(f'Computed log part: {dRt_glob_lw_log.min()} - {dRt_glob_lw_log.max()}')
+
+                dRt_lw_lin_sel = dRt_lw_lin.where(mask_lin, drop=True).sortby('freq')
+                dRt_glob_lw_lin = ctl.global_mean(dRt_lw_lin_sel)
+                dRt_glob_lw_lin.load()
+                print(f'Computed lin part: {dRt_glob_lw_lin.min()} - {dRt_glob_lw_lin.max()}')
             else:
                 raise ValueError(f'Kernel wv method {kernel.wv_method} not recognized. Use one among: linear, log, hybrid')
 
@@ -2391,7 +2401,9 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
             elif kernel.wv_method == 'log':
                 dRt_glob_lw = dRt_glob_lw_log
             else:
-                dRt_glob_lw = xr.concat([dRt_glob_lw_log, dRt_glob_lw_lin], dim = 'freq')
+
+                dRt_glob_lw = xr.concat([dRt_glob_lw_log, dRt_glob_lw_lin], dim='freq').sortby('freq')
+               # dRt_glob_lw = xr.concat([dRt_glob_lw_log, dRt_glob_lw_lin], dim = 'freq')
         else:
             dRt_glob_lw = ctl.global_mean(dRt_lw)
             dRt_glob_lw.load()
@@ -2416,6 +2428,7 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
             dRt_glob.close()
         
     return radiation
+
 
 #CLOUD ANOMALY
 def Rad_anomaly_cloud(experiment: Experiment, cart_out: str, output_lw_sw: bool = False, save_pattern: bool = False) -> xr.DataArray:
