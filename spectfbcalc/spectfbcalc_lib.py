@@ -139,17 +139,17 @@ class Kernel:
 
         if self.name in ['HUANG', 'ERA5']:
             self.dp = self.dp/100. # in units of 100 hPa
-
+            self.dp.attrs['units'] = '100 hPa'
+    
 
     def recompute_dp(self, experiment: Experiment) -> None:
         """
-        Recomputes the width of atmospheric layers (dp) based on the model's 
-        actual surface pressure, dynamically masking layers below the surface.
-
+        Recomputes the width of atmospheric layers (dp) based on the model surface pressure, dynamically masking layers below the surface.
+    
         Parameters
         ----------
         experiment 
-            An instance of the Experiment class containing the model's surface pressure data.
+            An instance of the Experiment class containing the model surface pressure data.
         """
         if experiment.surf_pressure is None:
             print(f"Surface pressure not available in experiment {experiment.name}, using default dp for kernel {self.name}")
@@ -157,24 +157,71 @@ class Kernel:
 
         if self.dp is None:
             raise ValueError(f"Cannot recompute dp for kernel {self.name}: dp not available")
-            
-        # Surface mask
-        wid_mask = np.empty([len(self.dp.plev)] + list(experiment.surf_pressure.shape))
         
-        for ila in range(len(experiment.surf_pressure.lat)):
-            for ilo in range(len(experiment.surf_pressure.lon)):
-                ind = np.where((experiment.surf_pressure[ila, ilo].values - self.dp.plev.values) > 0)[0][0]
-                wid_mask[:ind, ila, ilo] = np.nan
-                wid_mask[ind, ila, ilo] = experiment.surf_pressure[ila, ilo].values - self.dp.plev.values[ind]
-                wid_mask[ind+1:, ila, ilo] = self.dp.values[ind+1:]
+        surf_pressure = experiment.surf_pressure
+        dp = self.dp
+        plev = dp.plev
 
-        k = self.kernel[('clr', 't')]
-        wid_mask = xr.DataArray(wid_mask, dims = k.dims[1:], coords = k.drop('month').coords)
+        if plev.values[1]-plev.values[0] > 0:
+            print('WARNING: plev is in the inverse order! reordering.. (this should not happen...)')
+            print('Reordering vertical levels from surf to TOA')
+            self.dp = self.dp.sortby('plev', ascending=False)
+            for k in self.kernel:
+                self.kernel[k] = self.kernel[k].sortby('plev', ascending=False)
 
-        if self.name in ['HUANG', 'ERA5']:
-            self.dp = wid_mask/100. # in units of 100 hPa
+        # Expand dp to (plev, lat, lon) using surf_pressure coordinates
+        dp = dp.expand_dims({'lat': surf_pressure.lat, 'lon': surf_pressure.lon})
+        plev = plev.expand_dims({'lat': surf_pressure.lat, 'lon': surf_pressure.lon})
+        
+        # Mask all levels below surface (where plev > surf_pressure)
+        wid_mask = dp.where(plev <= surf_pressure, np.nan)
+        
+        # this is the index of the first level ABOVE the surface
+        boundary_up = (plev >= surf_pressure).argmin(dim='plev')
+        boundary_low = boundary_up - 1
+
+        # If first level is already above surface:
+        boundary_up = xr.where(boundary_low < 0, 1, boundary_up)
+        boundary_low = xr.where(boundary_low < 0, 0, boundary_low)
+        
+        boundary_up_pres = plev.isel(plev = boundary_up)
+        partial_thickness = (surf_pressure - boundary_up_pres)
+        if dp.units == '100 hPa':
+            print('Converting thickness in unit of 100 hPa')
+            partial_thickness = partial_thickness/100.
+
+        def apply_boundary_mask(wid_mask_plev, boundary_idx, partial_thickness):
+            """Apply boundary layer thickness at the specified plev index."""
+            result = wid_mask_plev.copy()
+            result[int(boundary_idx)] = partial_thickness
+            return result
+
+        # this assigns a partial thickness to the first level BELOW surface
+        wid_mask = xr.apply_ufunc(
+            apply_boundary_mask,
+            wid_mask,                      # Input: (plev, lat, lon)
+            boundary_low,                   # Input: (lat, lon)
+            partial_thickness,             # Input: (lat, lon)
+            input_core_dims=[['plev'], [], []],  # Only plev is a core dim
+            output_core_dims=[['plev']],
+            vectorize=True,
+            dask='parallelized',
+            output_dtypes=[float]
+        )
+
+        # Sanity check
+        wma = wid_mask.max(['lat', 'lon'])
+        if self.name in ['HUANG', 'ERA5']: wma = wma/100.
+        check_mean = (wma/dp).sel(plev = slice(500, 800)).mean()
+        if check_mean > 1.5 or check_mean < 0.5:
+            print('WARNING!! weird values in recomputed dp.. keeping original -> not using surf_pressure!!')
+            print('new', wma)
+            print('old', dp)
         else:
             self.dp = wid_mask
+            self.dp.attrs['units'] = wid_mask.units
+
+        #return dp, plev, surf_pressure, boundary_up, boundary_low, wid_mask
 
 
     def __repr__(self) -> str:
@@ -1652,10 +1699,13 @@ def mask_strato(ta: xr.DataArray, debug = False) -> xr.DataArray:
         lapse=(a/b)*(c/d)*(k*g/R)
     
         plev_mean = (c/2)**(1/k)
-        #print(lev1_P, lev2_P, c, plev_mean, lapse.mean())
         plevs.append(plev_mean)
         result.append(lapse)
-
+        
+        if debug: 
+            lapse.load()
+            print(lev1_P, lev2_P, c, plev_mean, lapse.mean().values)
+        
     lapse_da = xr.concat(result, dim="plev").assign_coords(plev=plevs)
     lapse_da.name = 'lapse'
     lapse_da = lapse_da * 1000. # convert to °C/km
@@ -1664,14 +1714,20 @@ def mask_strato(ta: xr.DataArray, debug = False) -> xr.DataArray:
     lapse_da = lapse_da.assign_coords(plev_k=('plev', lapse_da.plev.values**k))
     lapse_da = lapse_da.swap_dims({'plev': 'plev_k'})
     new_plev_k = ta.plev.values**k
-    # print(new_plev_k)
+    if debug: print('new plev k', new_plev_k)
     lapse_interp = lapse_da.interp(plev_k=new_plev_k, kwargs={"fill_value": "extrapolate"})
-    # print(lapse_interp.plev)
+    if debug: 
+        print('plev', lapse_interp.plev)
+        for lev in lapse_interp.plev:
+            print(lev.values, lapse_interp.sel(plev = lev).mean().values)
+
     lapse_interp = lapse_interp.assign_coords(plev = ('plev_k', ta.plev.values))
     lapse_interp = lapse_interp.swap_dims({'plev_k': 'plev'})
     lapse_interp = lapse_interp.drop_vars('plev_k')
 
-    cond = xr.where((lapse_interp.plev < 550) & (lapse_interp.plev > 75), lapse_interp <= -2, True)
+
+    cond = xr.where((lapse_interp.plev < 550) & (lapse_interp.plev > 75), lapse_interp >= 2, True)
+    cond = xr.where(cond.plev <= 75, False, cond)
 
     # This to ensure the levels are in the right order
     cond_ok = cond.sel(plev = pres)
@@ -2156,6 +2212,7 @@ def Rad_anomaly_planck_atm_lr(experiment: Experiment, kernel: Kernel, cart_out: 
     if use_strat_mask:
         mask = mask_strato(experiment.ds['ta'])
         ta_anom = (experiment.ds_anom['ta'] * mask).sel(plev = mask.plev)
+        # print('check mask -> ', mask.isel(time = slice(0,120)).sel(plev = 237.5).mean().values)
     else:
         ta_anom = experiment.ds_anom['ta']
     
@@ -2315,6 +2372,7 @@ def Rad_anomaly_wv(experiment: Experiment, control: Experiment, kernel: Kernel, 
     if use_strat_mask:
         mask=mask_strato(experiment.ds['ta'])
         anoms_hus=(anoms_hus * mask).sel(plev = mask.plev)
+        # print('check mask -> ', mask.isel(time = slice(0,120)).sel(plev = 237.5).mean().values)
         if kernel.name == 'SPECTRAL': 
             anoms_hus_log = (anoms_hus_log * mask).sel(plev = mask.plev)
             
@@ -2784,7 +2842,7 @@ def regre_with_err(gtas: np.ndarray, feedback: np.ndarray, bootstrap_error: bool
     else: 
         x = np.asarray(gtas)
         y = np.asarray(feedback)
-        bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=10000, confidence_level=0.95, method='BCa', random_state=42)
+        bs = stats.bootstrap((x, y), lambda x, y: stats.linregress(x, y).slope, paired=True, n_resamples=1000, confidence_level=0.95, method='BCa', random_state=42)
     
         fb_coef = SimpleNamespace(
             slope=res.slope,
