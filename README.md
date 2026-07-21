@@ -16,7 +16,5 @@ For full installation instructions, usage tutorials, theoretical framework, and 
 ```bash
 git clone [https://github.com/fedef17/SpectFbCalc/](https://github.com/fedef17/SpectFbCalc/)
 cd SpectFbCalc
-conda env create -f environment.yml
-conda activate spectfbcalc
 bash install.sh
 ```
